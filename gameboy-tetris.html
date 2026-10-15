@@ -831,7 +831,109 @@ GB.APP = (function () {
     };
   }
 
-  return { createTicker: createTicker };
+  // ---- Input: keys to the six actions. ----
+  var ACTIONS = ['left', 'right', 'down', 'rotate', 'start', 'music'];
+  // Requirements 2.4 defaults. Values are KeyboardEvent.code (physical keys).
+  var DEFAULT_BINDINGS = {
+    left: 'ArrowLeft', right: 'ArrowRight', down: 'ArrowDown',
+    rotate: 'ArrowUp', start: 'Enter', music: 'KeyM'
+  };
+  var ARROWS = { ArrowLeft: 1, ArrowRight: 1, ArrowUp: 1, ArrowDown: 1 };
+
+  function emptyActions() {
+    return { left: false, right: false, down: false, rotate: false, start: false, music: false };
+  }
+
+  // Tracks held keys and press edges. Hold timing comes from game frames, so
+  // OS key-repeat events are ignored. Ctrl, Alt and Meta combos are ignored
+  // (assumption I2). getBindings returns the live table.
+  function createInput(getBindings) {
+    var down = {};        // code -> true while held
+    var pressed = {};     // code -> true, pressed since the last frame
+
+    function actionOf(code) {
+      var b = getBindings();
+      for (var i = 0; i < ACTIONS.length; i++) if (b[ACTIONS[i]] === code) return ACTIONS[i];
+      return null;
+    }
+
+    // e: { code, repeat, ctrlKey, altKey, metaKey }. Returns true when the
+    // page should call preventDefault.
+    function keyDown(e) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      var bound = actionOf(e.code) !== null;
+      var block = bound || !!ARROWS[e.code];
+      if (e.repeat) return block;
+      down[e.code] = true;
+      pressed[e.code] = true;
+      return block;
+    }
+
+    function keyUp(e) {
+      delete down[e.code];
+      return actionOf(e.code) !== null || !!ARROWS[e.code];
+    }
+
+    function clear() { down = {}; pressed = {}; }
+
+    // Snapshot for one game frame. A tap that started and ended inside the
+    // frame still counts as held for that frame.
+    function frame() {
+      var b = getBindings();
+      var held = emptyActions(), edge = emptyActions();
+      for (var i = 0; i < ACTIONS.length; i++) {
+        var a = ACTIONS[i], code = b[a];
+        edge[a] = !!pressed[code];
+        held[a] = !!down[code] || edge[a];
+      }
+      pressed = {};
+      return { held: held, pressed: edge };
+    }
+
+    return { keyDown: keyDown, keyUp: keyUp, clear: clear, frame: frame };
+  }
+
+  // ---- Play session (Phase 4: start key restarts after game over). ----
+  function createPlay(opts) {
+    var R = GB.RULES;
+    var self = {
+      game: R.createGame({ startLevel: opts.startLevel || 0, rng: opts.rng }),
+      paused: false,
+      frames: 0
+    };
+
+    self.pause = function () { if (!self.game.over) self.paused = true; };
+
+    self.step = function (input) {
+      var p = input.pressed, h = input.held;
+      if (self.game.over) {
+        if (p.start) {
+          self.game = R.createGame({ startLevel: opts.startLevel || 0, rng: opts.rng });
+          self.paused = false;
+        }
+        return [];
+      }
+      if (p.start) self.paused = !self.paused;
+      if (self.paused) return [];
+      self.frames++;
+      return R.step(self.game, { left: h.left, right: h.right, down: h.down, rotate: p.rotate });
+    };
+
+    self.render = function (fb) {
+      var label = self.game.over ? 'GAME OVER' : (self.paused ? 'PAUSE' : '');
+      GB.VIEW.renderPlay(fb, self.game, { label: label });
+    };
+
+    return self;
+  }
+
+  return {
+    createTicker: createTicker,
+    ACTIONS: ACTIONS,
+    DEFAULT_BINDINGS: DEFAULT_BINDINGS,
+    createInput: createInput,
+    createPlay: createPlay
+  };
 })();
 
 /* ==END LOGIC== */
@@ -905,7 +1007,22 @@ var PLATFORM = (function () {
     return ticker;
   }
 
-  return { createScreen: createScreen, fitToWindow: fitToWindow, startLoop: startLoop };
+  // Keyboard, blur and visibility. onAway runs when the page loses focus or
+  // is hidden; onBack runs when it is visible again.
+  function bindInput(input, onAway, onBack) {
+    window.addEventListener('keydown', function (e) {
+      if (input.keyDown(e)) e.preventDefault();
+    });
+    window.addEventListener('keyup', function (e) {
+      if (input.keyUp(e)) e.preventDefault();
+    });
+    window.addEventListener('blur', onAway);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) onAway(); else onBack();
+    });
+  }
+
+  return { createScreen: createScreen, fitToWindow: fitToWindow, startLoop: startLoop, bindInput: bindInput };
 })();
 
 /* ===== BOOT ===== */
@@ -916,15 +1033,19 @@ var PLATFORM = (function () {
   PLATFORM.fitToWindow(canvas, screen);
   window.addEventListener('resize', function () { PLATFORM.fitToWindow(canvas, screen); });
 
-  // Attract run: the engine plays with no input and restarts after game over.
-  var game = GB.RULES.createGame({ startLevel: 0, rng: Math.random });
-  PLATFORM.startLoop({
-    step: function () {
-      GB.RULES.step(game, {});
-      if (game.over) game = GB.RULES.createGame({ startLevel: 0, rng: Math.random });
-    },
-    render: function (fb) { GB.VIEW.renderPlay(fb, game); }
+  var bindings = Object.assign({}, GB.APP.DEFAULT_BINDINGS);
+  var input = GB.APP.createInput(function () { return bindings; });
+  var app = GB.APP.createPlay({ startLevel: 0, rng: Math.random });
+  var ticker = PLATFORM.startLoop({
+    step: function () { app.step(input.frame()); },
+    render: function (fb) { app.render(fb); }
   }, screen);
+  PLATFORM.bindInput(input, function () {
+    input.clear();
+    app.pause();
+  }, function () { ticker.reset(); });
+  // Read-only handle for end-to-end tests.
+  window.gbApp = app;
 })();
 </script>
 </body>

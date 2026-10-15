@@ -554,7 +554,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | 1 | ✅ Done | See 12.1 |
 | 2 | ✅ Done | See 12.2 |
 | 3 | ✅ Done (owner check open) | See 12.3 |
-| 4 | Not started | |
+| 4 | ✅ Done | See 12.4 |
 | 5 | Not started | |
 | 6 | Not started | |
 | 7 | Not started | |
@@ -590,4 +590,12 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - The page now runs an attract game with no input that restarts after game over.
 - Validation: `npm test` 56/56 pass. `npm run test:e2e` 4/4 pass (four colors only at 1920x1080, 1024x700 and 360x640).
 - Open: owner side-by-side check of the play screen against the screenshots (L3).
+- Blockers: none.
+
+### 12.4 Phase 4
+
+- Done: `APP.createInput` maps `KeyboardEvent.code` to the six actions through a live binding table (`DEFAULT_BINDINGS`). It ignores OS repeat events and Ctrl, Alt or Meta combos (I2). It prevents default for bound keys and all arrows. A tap inside one frame still counts as held for that frame. `APP.createPlay` runs the game: Start toggles PAUSE (I6), blur or a hidden tab clears keys and pauses, and GAME OVER plus Start restarts (temporary stub, removed in Phase 5).
+- As in the ROM (`bank_000.s` `$1bce`), the unpause frame runs game logic.
+- `window.gbApp` is a read-only handle for E2E tests.
+- Validation: `npm test` 68/68 pass. `npm run test:e2e` 11/11 pass, 55/55 with `--repeat-each 5`. Hold Left gives moves 23 then 9 frames apart in the browser.
 - Blockers: none.
