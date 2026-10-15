@@ -557,7 +557,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | 4 | ✅ Done | See 12.4 |
 | 5 | ✅ Done (owner check open) | See 12.5 |
 | 6 | ✅ Done | See 12.6 |
-| 7 | Not started | |
+| 7 | ✅ Done | See 12.7 |
 | 8 | Not started | |
 | 9 | Not started | |
 
@@ -614,4 +614,10 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - `#notice` "Scores not saved" shows when storage fails (styled in Phase 9).
 - Decision: corrupt stored data falls back to defaults without the notice, because the next save still works. The notice means "this session cannot save".
 - Validation: `npm test` 91/91 pass. `npm run test:e2e` 16/16 pass, 48/48 with `--repeat-each 3` (real top-out with stubbed `Math.random`, name entry, reload, Top 10 and top-3 panel match reference renders; blocked storage shows the notice).
+- Blockers: none.
+
+### 12.7 Phase 7
+
+- Done: binding model (`checkBinding`, `validateBindings`, reserved H, K and Esc; Ctrl, Alt and Meta combos never reach it). Label formatter (`keyLabel`). Keys screen on K from the title only: rows for the six actions plus RESET, fixed navigation (arrows, Enter to capture or reset, Esc to cancel or leave), messages KEY IN USE, RESERVED KEY, PRESS A KEY, SAVED, DEFAULTS. Bindings persist under `gbtetris.v1.bindings` and load with validation. The input layer reads `app.bindings` live.
+- Validation: `npm test` 100/100 pass. `npm run test:e2e` 20/20 pass, 40/40 with `--repeat-each 2` (Space rotate survives reload and Up stops rotating; duplicate rejected; RESET; K only on the title; menus follow new start and right keys).
 - Blockers: none.

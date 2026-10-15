@@ -1016,6 +1016,31 @@ GB.VIEW = (function () {
     drawText(fb, '\u2191', 7 + ne.pos, 12, 3, 0);
   }
 
+  // ---- Keys screen (I9 style). ----
+  var KEY_NAMES = { left: 'LEFT', right: 'RIGHT', down: 'DOWN', rotate: 'ROTATE', start: 'START', music: 'MUSIC', reset: 'RESET' };
+
+  function renderKeys(fb, ks, bindings) {
+    drawMenuBackground(fb);
+    drawHeader(fb, 'KEYS');
+    drawBox(fb, 8, 24, 144, 80);
+    var rows = GB.APP.KEY_ROWS;
+    for (var i = 0; i < rows.length; i++) {
+      var r = i < 6 ? 4 + i : 11;
+      if (i === ks.row) drawText(fb, '\u25b6', 2, r);
+      drawText(fb, KEY_NAMES[rows[i]], 3, r);
+      if (i < 6) {
+        var label = ks.capturing && i === ks.row ? '________' : GB.APP.keyLabel(bindings[rows[i]]);
+        drawText(fb, label, 10, r);
+      }
+    }
+    if (ks.message) {
+      fillRect(fb, 8, 112, 144, 8, 0);
+      drawText(fb, ks.message, 10 - Math.ceil(ks.message.length / 2), 14);
+    }
+    fillRect(fb, 16, 128, 128, 8, 0);
+    drawText(fb, '\u2191\u2193 ENTER ESC', 3, 16);
+  }
+
   // ---- A-TYPE level select (layout_aTypeSelectionScreen.bin structure). ----
   // blinkOn: the chosen level's digit shows dark (it flashes every 16 frames).
   function renderLevelSelect(fb, level, blinkOn, top3) {
@@ -1082,6 +1107,7 @@ GB.VIEW = (function () {
     renderLevelSelect: renderLevelSelect,
     renderTop10: renderTop10,
     renderNameEntry: renderNameEntry,
+    renderKeys: renderKeys,
     hash: hash
   };
 })();
@@ -1356,6 +1382,86 @@ GB.APP = (function () {
     return ne;
   }
 
+  // ---- Key bindings (requirements 2.4 and 5). ----
+  // Reserved: H, K and Esc. Ctrl, Alt and Meta combos never reach here (I2).
+  var RESERVED = { KeyH: 1, KeyK: 1, Escape: 1 };
+
+  function isCode(c) { return typeof c === 'string' && /^[A-Za-z0-9]{1,32}$/.test(c); }
+
+  // Checks binding code to action. Returns { ok, reason }.
+  function checkBinding(bindings, action, code) {
+    if (!isCode(code)) return { ok: false, reason: 'BAD KEY' };
+    if (RESERVED[code]) return { ok: false, reason: 'RESERVED KEY' };
+    for (var i = 0; i < ACTIONS.length; i++) {
+      var a = ACTIONS[i];
+      if (a !== action && bindings[a] === code) return { ok: false, reason: 'KEY IN USE' };
+    }
+    return { ok: true, reason: '' };
+  }
+
+  // Loaded tables must hold six unique, non-reserved codes; else defaults.
+  function validateBindings(raw) {
+    var out = {}, seen = {};
+    if (!raw || typeof raw !== 'object') return Object.assign({}, DEFAULT_BINDINGS);
+    for (var i = 0; i < ACTIONS.length; i++) {
+      var code = raw[ACTIONS[i]];
+      if (!isCode(code) || RESERVED[code] || seen[code]) return Object.assign({}, DEFAULT_BINDINGS);
+      seen[code] = true;
+      out[ACTIONS[i]] = code;
+    }
+    return out;
+  }
+
+  // Short key label: arrows as words, KeyX -> X, DigitN -> N, others
+  // uppercased and cut to 8 characters.
+  function keyLabel(code) {
+    var arrows = { ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', ArrowUp: 'UP', ArrowDown: 'DOWN' };
+    if (arrows[code]) return arrows[code];
+    var m = /^(?:Key|Digit)([A-Z0-9])$/.exec(code);
+    if (m) return m[1];
+    return String(code).toUpperCase().slice(0, 8);
+  }
+
+  var KEY_ROWS = ['left', 'right', 'down', 'rotate', 'start', 'music', 'reset'];
+  var MESSAGE_FRAMES = 90;
+
+  // ---- Keys screen model. Navigation is fixed: arrows, Enter and Esc. ----
+  // onChange(bindings) runs after each accepted change.
+  function createKeysScreen(getBindings, onChange) {
+    var ks = { row: 0, capturing: false, message: '', messageTimer: 0, done: false };
+
+    function say(text) { ks.message = text; ks.messageTimer = MESSAGE_FRAMES; }
+
+    ks.step = function (codes) {
+      if (ks.messageTimer > 0 && --ks.messageTimer === 0) ks.message = '';
+      for (var i = 0; i < codes.length; i++) {
+        var code = codes[i];
+        if (ks.capturing) {
+          ks.capturing = false;
+          if (code === 'Escape') { say(''); continue; }
+          var action = KEY_ROWS[ks.row];
+          var b = getBindings();
+          var res = checkBinding(b, action, code);
+          if (!res.ok) { say(res.reason); continue; }
+          var next = Object.assign({}, b);
+          next[action] = code;
+          onChange(next);
+          say('SAVED');
+          continue;
+        }
+        if (code === 'Escape') { ks.done = true; return; }
+        if (code === 'ArrowUp') ks.row = (ks.row + KEY_ROWS.length - 1) % KEY_ROWS.length;
+        else if (code === 'ArrowDown') ks.row = (ks.row + 1) % KEY_ROWS.length;
+        else if (code === 'Enter') {
+          if (KEY_ROWS[ks.row] === 'reset') { onChange(Object.assign({}, DEFAULT_BINDINGS)); say('DEFAULTS'); }
+          else { ks.capturing = true; say('PRESS A KEY'); }
+        }
+      }
+    };
+
+    return ks;
+  }
+
   // ---- Screen state machine. ----
   // Screens: title, levelSelect, play, gameOver. Each has enter, update and
   // render. opts.rng feeds the randomizer.
@@ -1371,7 +1477,9 @@ GB.APP = (function () {
       store: store,
       scores: store.load('scores', validateScores, function () { return []; }),
       entry: null,
-      entryRank: 0
+      entryRank: 0,
+      bindings: store.load('bindings', validateBindings, function () { return Object.assign({}, DEFAULT_BINDINGS); }),
+      keys: null
     };
 
     function has(codes, code) { return !!codes && codes.indexOf(code) >= 0; }
@@ -1382,6 +1490,7 @@ GB.APP = (function () {
         update: function (inp) {
           if (inp.pressed.start) go('levelSelect');
           else if (has(inp.codes, 'KeyH')) go('top10');
+          else if (has(inp.codes, 'KeyK')) go('keys');
         },
         render: function (fb) { V.renderTitle(fb); }
       },
@@ -1390,6 +1499,19 @@ GB.APP = (function () {
         // Assumption I5: Esc or the bound start key returns to the title.
         update: function (inp) { if (inp.pressed.start || has(inp.codes, 'Escape')) go('title'); },
         render: function (fb) { V.renderTop10(fb, app.scores); }
+      },
+      keys: {
+        enter: function () {
+          app.keys = createKeysScreen(function () { return app.bindings; }, function (next) {
+            app.bindings = next;
+            store.save('bindings', next);
+          });
+        },
+        update: function (inp) {
+          app.keys.step(inp.codes || []);
+          if (app.keys.done) go('title');
+        },
+        render: function (fb) { V.renderKeys(fb, app.keys, app.bindings); }
       },
       nameEntry: {
         enter: function () { app.entry = createNameEntry(); },
@@ -1469,6 +1591,12 @@ GB.APP = (function () {
     insertScore: insertScore,
     createStore: createStore,
     createNameEntry: createNameEntry,
+    RESERVED: RESERVED,
+    checkBinding: checkBinding,
+    validateBindings: validateBindings,
+    keyLabel: keyLabel,
+    KEY_ROWS: KEY_ROWS,
+    createKeysScreen: createKeysScreen,
     GAME_OVER_FRAMES: GAME_OVER_FRAMES,
     GAME_OVER_SKIP: GAME_OVER_SKIP,
     createApp: createApp
@@ -1573,10 +1701,9 @@ var PLATFORM = (function () {
   PLATFORM.fitToWindow(canvas, screen);
   window.addEventListener('resize', function () { PLATFORM.fitToWindow(canvas, screen); });
 
-  var bindings = Object.assign({}, GB.APP.DEFAULT_BINDINGS);
-  var input = GB.APP.createInput(function () { return bindings; });
   var store = GB.APP.createStore(function () { return window.localStorage; });
   var app = GB.APP.createApp({ rng: Math.random, store: store });
+  var input = GB.APP.createInput(function () { return app.bindings; });
   var ticker = PLATFORM.startLoop({
     step: function () { app.step(input.frame()); },
     render: function (fb) {
