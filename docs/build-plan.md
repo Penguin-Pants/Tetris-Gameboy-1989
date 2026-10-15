@@ -558,7 +558,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | 5 | ✅ Done (owner check open) | See 12.5 |
 | 6 | ✅ Done | See 12.6 |
 | 7 | ✅ Done | See 12.7 |
-| 8 | Not started | |
+| 8 | ✅ Done (owner listening check open) | See 12.8 |
 | 9 | Not started | |
 
 ### 12.1 Phase 1
@@ -620,4 +620,11 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 
 - Done: binding model (`checkBinding`, `validateBindings`, reserved H, K and Esc; Ctrl, Alt and Meta combos never reach it). Label formatter (`keyLabel`). Keys screen on K from the title only: rows for the six actions plus RESET, fixed navigation (arrows, Enter to capture or reset, Esc to cancel or leave), messages KEY IN USE, RESERVED KEY, PRESS A KEY, SAVED, DEFAULTS. Bindings persist under `gbtetris.v1.bindings` and load with validation. The input layer reads `app.bindings` live.
 - Validation: `npm test` 100/100 pass. `npm run test:e2e` 20/20 pass, 40/40 with `--repeat-each 2` (Space rotate survives reload and Up stops rotating; duplicate rejected; RESET; K only on the title; menus follow new start and right keys).
+- Blockers: none.
+
+### 12.8 Phase 8
+
+- Done: `DATA.SONG` holds an original transcription of the public-domain folk tune Korobeiniki (melody, A minor, form A A B) and an original bass line (quarter-note roots and fifths), 144 bpm, with a provenance comment. Not taken from `songData.s`. `APP.createSequencer` builds the timeline and returns exact event times across loop wraps. `APP.musicMode` maps screens to play, pause or stop. The music action toggles on every screen (not while the Keys screen captures a key) and persists as `gbtetris.v1.music`. `PLATFORM.createAudio`: AudioContext on the first key press, two pulse voices (25% and 50% duty periodic waves) with short envelopes, 25 ms tick and 100 ms lookahead, `suspend` on pause, blur or hidden tab, stop and reset on game over. When music is off, no notes are scheduled and master gain is 0. Any WebAudio failure leaves the game silent and running.
+- Validation: `npm test` 108/108 pass. `npm run test:e2e` 25/25 pass, 50/50 with `--repeat-each 2` (stubbed AudioContext: no context before the first key, no notes on the title, notes in play, suspend on pause, none after game over, none while off, state after reload; no WebAudio; real WebAudio without errors).
+- Open: owner listening check for tempo and tone (A2).
 - Blockers: none.

@@ -663,9 +663,42 @@ GB.DATA = (function () {
   var LEVEL_CELLS = [];
   for (var lv = 0; lv < 10; lv++) LEVEL_CELLS.push([5 + 2 * (lv % 5), lv < 5 ? 6 : 8]);
 
+  // ---- Music. Provenance: original transcription of the public-domain
+  // Russian folk song "Korobeiniki" (melody by ear, A minor), with an
+  // original bass line (quarter-note roots and fifths). Not taken from the
+  // ROM song data (songData.s) or from any game arrangement.
+  // Notes are [MIDI pitch, beats]; pitch 0 is a rest. Form: A A B.
+  var MELODY_A = [
+    [76, 1], [71, 0.5], [72, 0.5], [74, 1], [72, 0.5], [71, 0.5],
+    [69, 1], [69, 0.5], [72, 0.5], [76, 1], [74, 0.5], [72, 0.5],
+    [71, 1.5], [72, 0.5], [74, 1], [76, 1],
+    [72, 1], [69, 1], [69, 2],
+    [74, 1.5], [77, 0.5], [81, 1], [79, 0.5], [77, 0.5],
+    [76, 1.5], [72, 0.5], [76, 1], [74, 0.5], [72, 0.5],
+    [71, 1], [71, 0.5], [72, 0.5], [74, 1], [76, 1],
+    [72, 1], [69, 1], [69, 2]
+  ];
+  var MELODY_B = [
+    [76, 2], [72, 2], [74, 2], [71, 2], [72, 2], [69, 2], [68, 2], [71, 2],
+    [76, 2], [72, 2], [74, 2], [71, 2], [72, 1], [76, 1], [81, 2], [80, 4]
+  ];
+  // Chords per bar: E Am E Am Dm Am E Am, then B: Am E Am E Am E Am E.
+  function bassBar(root) { return [[root, 1], [root + 7, 1], [root + 12, 1], [root + 7, 1]]; }
+  var E2 = 40, A2 = 45, D3 = 50;
+  var BASS_A = [E2, A2, E2, A2, D3, A2, E2, A2].reduce(function (acc, r) { return acc.concat(bassBar(r)); }, []);
+  var BASS_B = [A2, E2, A2, E2, A2, E2, A2, E2].reduce(function (acc, r) { return acc.concat(bassBar(r)); }, []);
+  var SONG = {
+    bpm: 144,
+    voices: [
+      { name: 'melody', duty: 0.25, gain: 0.16, notes: MELODY_A.concat(MELODY_A, MELODY_B) },
+      { name: 'bass', duty: 0.5, gain: 0.12, notes: BASS_A.concat(BASS_A, BASS_B) }
+    ]
+  };
+
   return {
     SHADE: SHADE,
     compile: compile,
+    SONG: SONG,
     LEVEL_CELLS: LEVEL_CELLS,
     TILES: compiledTiles,
     BLOCKS: compiledBlocks,
@@ -1462,6 +1495,51 @@ GB.APP = (function () {
     return ks;
   }
 
+  // ---- Music sequencer (pure). Note times are computed from the loop index
+  // and the offset inside the loop, so they do not drift over many loops.
+  function createSequencer(song) {
+    var spb = 60 / song.bpm;
+    var voices = song.voices.map(function (v, vi) {
+      var t = 0, events = [];
+      v.notes.forEach(function (n) {
+        if (n[0] > 0) events.push({ voice: vi, midi: n[0], offset: t * spb, dur: n[1] * spb });
+        t += n[1];
+      });
+      return { beats: t, events: events };
+    });
+    var loopBeats = voices[0].beats;
+    var seq = { loopLength: loopBeats * spb, voices: voices };
+
+    // Events with start time in [t0, t1), times relative to song start.
+    seq.eventsBetween = function (t0, t1) {
+      var out = [];
+      var L = seq.loopLength;
+      var first = Math.max(0, Math.floor(t0 / L));
+      var last = Math.floor(t1 / L);
+      for (var loop = first; loop <= last; loop++) {
+        for (var vi = 0; vi < voices.length; vi++) {
+          var ev = voices[vi].events;
+          for (var i = 0; i < ev.length; i++) {
+            var at = loop * L + ev[i].offset;
+            if (at >= t0 && at < t1) out.push({ voice: vi, midi: ev[i].midi, time: at, dur: ev[i].dur });
+          }
+        }
+      }
+      out.sort(function (a, b) { return a.time - b.time || a.voice - b.voice; });
+      return out;
+    };
+    return seq;
+  }
+
+  function midiToHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+  // Requirements 2.6: music plays during play, pauses on pause, stops on game
+  // over and is silent on every other screen.
+  function musicMode(app) {
+    if (app.screen !== 'play') return 'stop';
+    return app.play.paused ? 'pause' : 'play';
+  }
+
   // ---- Screen state machine. ----
   // Screens: title, levelSelect, play, gameOver. Each has enter, update and
   // render. opts.rng feeds the randomizer.
@@ -1479,7 +1557,8 @@ GB.APP = (function () {
       entry: null,
       entryRank: 0,
       bindings: store.load('bindings', validateBindings, function () { return Object.assign({}, DEFAULT_BINDINGS); }),
-      keys: null
+      keys: null,
+      musicOn: store.load('music', function (v) { return typeof v === 'boolean' ? v : true; }, function () { return true; })
     };
 
     function has(codes, code) { return !!codes && codes.indexOf(code) >= 0; }
@@ -1567,7 +1646,17 @@ GB.APP = (function () {
       screens[name].enter();
     }
 
-    app.step = function (inp) { screens[app.screen].update(inp); };
+    app.step = function (inp) {
+      // Music toggle works on every screen (A4), except while the Keys screen
+      // waits for a key to bind.
+      var capturing = app.screen === 'keys' && app.keys.capturing;
+      if (inp.pressed.music && !capturing) {
+        app.musicOn = !app.musicOn;
+        store.save('music', app.musicOn);
+      }
+      screens[app.screen].update(inp);
+    };
+    app.musicMode = function () { return musicMode(app); };
     app.render = function (fb) { screens[app.screen].render(fb); };
     // Blur or hidden tab.
     app.pause = function () { if (app.screen === 'play') app.play.pause(); };
@@ -1597,6 +1686,9 @@ GB.APP = (function () {
     keyLabel: keyLabel,
     KEY_ROWS: KEY_ROWS,
     createKeysScreen: createKeysScreen,
+    createSequencer: createSequencer,
+    midiToHz: midiToHz,
+    musicMode: musicMode,
     GAME_OVER_FRAMES: GAME_OVER_FRAMES,
     GAME_OVER_SKIP: GAME_OVER_SKIP,
     createApp: createApp
@@ -1689,7 +1781,130 @@ var PLATFORM = (function () {
     });
   }
 
-  return { createScreen: createScreen, fitToWindow: fitToWindow, startLoop: startLoop, bindInput: bindInput };
+  // ---- Audio: two pulse-style voices, lookahead scheduler. ----
+  // The AudioContext is created on the first key press (requirements 2.6,
+  // browsers block autoplay). Any WebAudio failure leaves the game silent.
+  var LOOKAHEAD = 0.1, TICK_MS = 25;
+
+  function pulseWave(ctx, duty) {
+    var n = 32, re = new Float32Array(n), im = new Float32Array(n);
+    for (var k = 1; k < n; k++) im[k] = (2 / (k * Math.PI)) * Math.sin(k * Math.PI * duty);
+    return ctx.createPeriodicWave(re, im);
+  }
+
+  function createAudio(song) {
+    var seq = GB.APP.createSequencer(song);
+    var ctx = null, master = null, waves = [], timer = null;
+    var mode = 'stop', muted = false, failed = false;
+    var origin = 0, cursor = 0, live = [];
+
+    function init() {
+      if (ctx || failed) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { failed = true; return; }
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = muted ? 0 : 1;
+        master.connect(ctx.destination);
+        waves = song.voices.map(function (v) { return pulseWave(ctx, v.duty); });
+      } catch (e) {
+        failed = true;
+        ctx = null;
+      }
+    }
+
+    function playNote(ev) {
+      var v = song.voices[ev.voice];
+      var t = origin + ev.time, end = t + ev.dur * 0.9;
+      var osc = ctx.createOscillator();
+      var g = ctx.createGain();
+      osc.setPeriodicWave(waves[ev.voice]);
+      osc.frequency.value = GB.APP.midiToHz(ev.midi);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(v.gain, t + 0.005);
+      g.gain.setValueAtTime(v.gain, Math.max(t + 0.005, end - 0.02));
+      g.gain.linearRampToValueAtTime(0, end);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(end + 0.01);
+      live.push(osc);
+      osc.onended = function () { var i = live.indexOf(osc); if (i >= 0) live.splice(i, 1); };
+    }
+
+    function tick() {
+      if (!ctx || mode !== 'play') return;
+      try {
+        var until = ctx.currentTime - origin + LOOKAHEAD;
+        if (until <= cursor) return;
+        var evs = seq.eventsBetween(cursor, until);
+        cursor = until;
+        if (muted) return; // time moves on; no notes while off
+        for (var i = 0; i < evs.length; i++) playNote(evs[i]);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function stopAll() {
+      for (var i = 0; i < live.length; i++) { try { live[i].stop(); } catch (e) { /* already stopped */ } }
+      live = [];
+    }
+
+    // Moves to the wanted mode: 'play', 'pause' or 'stop'.
+    function setMode(next) {
+      if (next === mode) return;
+      var prev = mode;
+      mode = next;
+      if (!ctx) return;
+      try {
+        if (next === 'play') {
+          if (prev === 'stop') { origin = ctx.currentTime + 0.05; cursor = 0; }
+          if (ctx.state === 'suspended') ctx.resume();
+          if (!timer) timer = setInterval(tick, TICK_MS);
+          tick();
+        } else if (next === 'pause') {
+          ctx.suspend();
+        } else {
+          stopAll();
+          cursor = 0;
+          if (ctx.state === 'suspended') ctx.resume();
+        }
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function setMuted(m) {
+      if (m === muted) return;
+      muted = m;
+      if (!ctx) return;
+      try {
+        master.gain.value = m ? 0 : 1;
+        if (m) stopAll();
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // First key press: create the context, then apply the current mode.
+    function unlock() {
+      if (ctx || failed) return;
+      init();
+      if (!ctx) return;
+      var want = mode;
+      mode = 'stop';
+      setMode(want);
+    }
+
+    return { unlock: unlock, setMode: setMode, setMuted: setMuted };
+  }
+
+  return {
+    createScreen: createScreen, fitToWindow: fitToWindow, startLoop: startLoop, bindInput: bindInput,
+    createAudio: createAudio
+  };
 })();
 
 /* ===== BOOT ===== */
@@ -1704,8 +1919,14 @@ var PLATFORM = (function () {
   var store = GB.APP.createStore(function () { return window.localStorage; });
   var app = GB.APP.createApp({ rng: Math.random, store: store });
   var input = GB.APP.createInput(function () { return app.bindings; });
+  var audio = PLATFORM.createAudio(GB.DATA.SONG);
+  window.addEventListener('keydown', function () { audio.unlock(); }, true);
   var ticker = PLATFORM.startLoop({
-    step: function () { app.step(input.frame()); },
+    step: function () {
+      app.step(input.frame());
+      audio.setMuted(!app.musicOn);
+      audio.setMode(app.musicMode());
+    },
     render: function (fb) {
       app.render(fb);
       notice.hidden = store.ok;
