@@ -15,10 +15,11 @@ export function extractLogic(html) {
   return html.slice(start + BEGIN.length, end);
 }
 
-// Returns a fresh GB namespace. Each call gets its own context.
+// Returns a fresh GB namespace. The block runs inside a function wrapper in
+// this realm, so arrays and errors compare normally in assertions.
 export function loadGB() {
   const code = extractLogic(readFileSync(HTML_PATH, 'utf8'));
-  const context = vm.createContext({});
-  vm.runInContext(code + '\n;this.GB = GB;', context, { filename: 'gameboy-tetris.html#logic' });
-  return context.GB;
+  const factory = vm.runInThisContext(`(function () {\n${code}\nreturn GB;\n})`,
+    { filename: 'gameboy-tetris.html#logic' });
+  return factory();
 }

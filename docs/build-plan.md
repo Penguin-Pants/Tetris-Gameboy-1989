@@ -552,7 +552,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | Phase | Status | Notes |
 |---|---|---|
 | 1 | ✅ Done | See 12.1 |
-| 2 | Not started | |
+| 2 | ✅ Done | See 12.2 |
 | 3 | Not started | |
 | 4 | Not started | |
 | 5 | Not started | |
@@ -567,4 +567,19 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - Palette sampled from flat screenshot regions: `#ffed79`, `#b4a446`, `#847947`, `#4e4e4e` (method in a `CONST` comment).
 - Deviation: the screenshots arrived without file names. They are stored under descriptive names in `reference/screenshots/`.
 - Validation: `npm test` 7/7 pass. `npm run test:e2e` 2/2 pass (no console output, zero requests, lightest shade).
+- Blockers: none.
+
+### 12.2 Phase 2
+
+- Done: `RULES` is a frame-exact port of `GameState00_InGameMain` plus the VBlank row work. API: `createGame({ startLevel, rng })`, `step(game, input)` returning `lock`, `clear`, `levelUp`, `gameOver`, `spawn` events.
+- Confirmed in the disassembly (the plan listed these as not yet read):
+  - Piece cells: `spriteData.s` `SpriteTiles_00..1b`. Rotate (A button) is state minus 1, which is clockwise.
+  - Spawn: grid cell (r, c) maps to field row r-1, column c+3 (`gfx.s` `GetScreen0AddressOfPieceSquare`).
+  - Gravity table in `bank_000.s` `$1b06` holds values minus 1 (counter reload). Periods equal requirement G5.
+  - Repeat counter `hStickyButtonCounter`: 23 on press, 9 on repeat, 1 after a blocked move, 23 when released. Not reset by a new piece.
+  - Soft drop: after a lock, a held Down needs a new press (`wCanPressDownToMakePieceFall`). Holding Left or Right with Down stops soft drop. Points = rows dropped.
+  - Score is added during row copy state 5, level check at row 3 copy, so the pre-clear level applies.
+- ROM quirks kept on purpose (G10): rows 0 and 1 are never checked for completion; a spawned piece can overlap the stack; a cell locked in hidden row -1 stays there.
+- Unverified assumptions (comments in code): hidden piece and repeat counter start values at game start; a hidden piece's gravity move has no effect. Verify by tracing the ROM in an emulator debugger.
+- Validation: `npm test` 45/45 pass. Tests: every G1 to G10 item, 1,000,000-draw randomizer share, fuzz (40 random and 5 bot games), 3 bot replays with golden score and board hash.
 - Blockers: none.

@@ -82,6 +82,401 @@ GB.CONST = (function () {
 })();
 
 /* ===== RULES ===== */
+// Frame-exact port of the A-Type in-game loop. Source files are in
+// vinheim3/tetris-gb-disasm: disasm/code/inGameFlow.s (IGF), bank_000.s (B0),
+// gfx.s, data/spriteData.s. One step() call equals one ROM frame:
+// GameState00_InGameMain (B0 $1bce), the main-loop timer tick (B0 $02d6),
+// then the VBlank handler (B0 $0199..$01cf).
+GB.RULES = (function () {
+  'use strict';
+  var C = GB.CONST;
+  var W = C.FIELD_W;
+  var H = C.FIELD_H;
+
+  var EMPTY = 0;
+  // Tile ids are the ROM tile bytes. Flashing row tile: constants.s TILE_FLASHING_PIECE.
+  var TILE_FLASH = 0x8c;
+
+  // Piece IDs (requirements 2.3): L0 J1 I2 O3 Z4 S5 T6.
+  // Rotation states: spriteData.s SpriteTiles_00..SpriteTiles_1b. Each state is a
+  // 4x4 grid; each cell is [gridRow, gridCol, tile].
+  var PIECES = [
+    [[[2, 0, 0x84], [2, 1, 0x84], [2, 2, 0x84], [3, 0, 0x84]],
+     [[1, 1, 0x84], [2, 1, 0x84], [3, 1, 0x84], [3, 2, 0x84]],
+     [[1, 2, 0x84], [2, 0, 0x84], [2, 1, 0x84], [2, 2, 0x84]],
+     [[1, 0, 0x84], [1, 1, 0x84], [2, 1, 0x84], [3, 1, 0x84]]],
+    [[[2, 0, 0x81], [2, 1, 0x81], [2, 2, 0x81], [3, 2, 0x81]],
+     [[1, 1, 0x81], [1, 2, 0x81], [2, 1, 0x81], [3, 1, 0x81]],
+     [[1, 0, 0x81], [2, 0, 0x81], [2, 1, 0x81], [2, 2, 0x81]],
+     [[1, 1, 0x81], [2, 1, 0x81], [3, 0, 0x81], [3, 1, 0x81]]],
+    [[[2, 0, 0x8a], [2, 1, 0x8b], [2, 2, 0x8b], [2, 3, 0x8f]],
+     [[0, 1, 0x80], [1, 1, 0x88], [2, 1, 0x88], [3, 1, 0x89]],
+     [[2, 0, 0x8a], [2, 1, 0x8b], [2, 2, 0x8b], [2, 3, 0x8f]],
+     [[0, 1, 0x80], [1, 1, 0x88], [2, 1, 0x88], [3, 1, 0x89]]],
+    [[[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]],
+     [[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]],
+     [[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]],
+     [[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]]],
+    [[[2, 0, 0x82], [2, 1, 0x82], [3, 1, 0x82], [3, 2, 0x82]],
+     [[1, 1, 0x82], [2, 0, 0x82], [2, 1, 0x82], [3, 0, 0x82]],
+     [[2, 0, 0x82], [2, 1, 0x82], [3, 1, 0x82], [3, 2, 0x82]],
+     [[1, 1, 0x82], [2, 0, 0x82], [2, 1, 0x82], [3, 0, 0x82]]],
+    [[[2, 1, 0x86], [2, 2, 0x86], [3, 0, 0x86], [3, 1, 0x86]],
+     [[1, 0, 0x86], [2, 0, 0x86], [2, 1, 0x86], [3, 1, 0x86]],
+     [[2, 1, 0x86], [2, 2, 0x86], [3, 0, 0x86], [3, 1, 0x86]],
+     [[1, 0, 0x86], [2, 0, 0x86], [2, 1, 0x86], [3, 1, 0x86]]],
+    [[[2, 0, 0x85], [2, 1, 0x85], [2, 2, 0x85], [3, 1, 0x85]],
+     [[1, 1, 0x85], [2, 1, 0x85], [2, 2, 0x85], [3, 1, 0x85]],
+     [[1, 1, 0x85], [2, 0, 0x85], [2, 1, 0x85], [2, 2, 0x85]],
+     [[1, 1, 0x85], [2, 0, 0x85], [2, 1, 0x85], [3, 1, 0x85]]]
+  ];
+
+  // Spawn: sprite base Y $18, X $3f (IGF $200d, $2010) plus spec offsets $ef/$f0
+  // (spriteData.s SpriteSpec_00) map grid cell (r, c) to field row r-1, column c+3
+  // (gfx.s GetScreen0AddressOfPieceSquare). SPAWN_ROW/COL is the grid origin.
+  var SPAWN_ROW = -1;
+  var SPAWN_COL = 3;
+
+  // hPieceFallingState and hRowsShiftingDownState values (constants.s).
+  var FALL_NONE = 0, FALL_HIT = 1, FALL_CHECK = 2, FALL_PROCESSED = 3;
+  var SHIFT_NONE = 0, SHIFT_RAM = 1, SHIFT_ROW_START = 2;
+
+  // Row-clear timing (IGF FlashCompletedTetrisRows): 7 phases 10 frames apart,
+  // then 13 frames before the RAM shift. Lock-to-check timer is 2 (IGF $2178).
+  var FLASH_PHASES = 7, FLASH_INTERVAL = 10, SHIFT_WAIT = 13, CHECK_WAIT = 2;
+  // Rows 0 and 1 are never checked for completion (IGF $214e: start at row 2).
+  var FIRST_CHECKED_ROW = 2;
+  // The score is added while the VRAM copy state equals 5 (B0 $1f9c), the level
+  // is checked when row 3 is copied (IGF $239a).
+  var SCORE_SHIFT_STATE = 5;
+  var LEVEL_CHECK_ROW = 3;
+  // A-Type stops level checks at 1000 lines (IGF $2463).
+  var LEVEL_LINES_LIMIT = 1000;
+
+  // The board holds field rows -1..17. Row -1 is the hidden tile-map row 31
+  // above the field (cleared by B0 FillBottom2RowsOfTileMapWithEmptyTile).
+  // A piece can reach it only with the vertical I at the top.
+  function idx(row, col) { return (row + 1) * W + col; }
+
+  function cells(type, rot) { return PIECES[type][rot]; }
+
+  function collides(board, type, rot, row, col) {
+    var cs = PIECES[type][rot];
+    for (var i = 0; i < 4; i++) {
+      var r = row + cs[i][0], c = col + cs[i][1];
+      if (c < 0 || c >= W || r >= H) return true;
+      if (r < -1) continue;
+      if (board[idx(r, c)] !== EMPTY) return true;
+    }
+    return false;
+  }
+
+  function addScore(g, value) {
+    g.score = Math.min(g.score + value, C.MAX_SCORE);
+  }
+
+  function gravityReload(level) { return C.GRAVITY[level] - 1; }
+
+  // IGF PlayNextPieceLoadNextAndHiddenPiece ($2007). The hidden piece gets up to
+  // 3 rolls; rolls 1 and 2 reroll when (candidate | preview | current) & $fc
+  // equals current, with piece ids times 4 as in the ROM spec index.
+  function loadNext(g) {
+    g.type = g.preview;
+    g.rot = 0;
+    g.row = SPAWN_ROW;
+    g.col = SPAWN_COL;
+    g.active = true;
+    var current = g.type * 4;
+    var preview = g.hidden;
+    var candidate;
+    for (var roll = 1; ; roll++) {
+      candidate = Math.floor(g.rng() * 7);
+      if (roll === 3) break;
+      if ((((candidate * 4) | (preview * 4) | current) & 0xfc) !== current) break;
+    }
+    g.preview = preview;
+    g.hidden = candidate;
+    g.gravCounter = g.gravReload;
+  }
+
+  function createGame(opts) {
+    var startLevel = opts.startLevel | 0;
+    if (startLevel < 0 || startLevel > C.MAX_START_LEVEL) throw new RangeError('startLevel');
+    if (typeof opts.rng !== 'function') throw new TypeError('rng');
+    var g = {
+      rng: opts.rng,
+      level: startLevel,
+      lines: 0,
+      score: 0,
+      shownScore: 0,
+      shownLines: 0,
+      board: new Array((H + 1) * W).fill(EMPTY),
+      vram: new Array(H * W).fill(EMPTY),
+      type: 0, rot: 0, row: SPAWN_ROW, col: SPAWN_COL, active: false,
+      // The ROM starts both specs as L (gfx.s SpriteSpecStruct_LPiece*). The hidden
+      // piece starts as L too (unverified assumption: cleared HRAM).
+      preview: 0,
+      hidden: 0,
+      fall: FALL_NONE,
+      shift: SHIFT_NONE,
+      timer1: 0,
+      timer2: 0,
+      // hStickyButtonCounter start value is not set by the in-game init. Start at
+      // the full delay (unverified assumption; matters only if a side key is
+      // already held at the first frame).
+      sticky: C.DAS_DELAY,
+      gravReload: gravityReload(startLevel),
+      gravCounter: gravityReload(startLevel),
+      holdCount: 0,
+      canPressDown: 0,
+      stuck: 0,
+      flashCount: 0,
+      clearRows: [],
+      pendingClear: 0,
+      held: { left: false, right: false, down: false },
+      over: false,
+      frame: 0
+    };
+    // B0 $1aa6..$1aac: three loads fill current, preview and hidden.
+    loadNext(g); loadNext(g); loadNext(g);
+    return g;
+  }
+
+  function tryShift(g, dx) {
+    g.col += dx;
+    if (collides(g.board, g.type, g.rot, g.row, g.col)) {
+      g.col -= dx;
+      // IGF $2547: a blocked move retries every frame.
+      g.sticky = 1;
+    }
+  }
+
+  // IGF InGameCheckButtonsPressed ($24bb). Rotate is the A button (spec index
+  // minus 1), which is clockwise. Right has priority over left.
+  function checkButtons(g, pressed, held, rotate) {
+    if (!g.active) return;
+    if (rotate) {
+      var pre = g.rot;
+      g.rot = (g.rot + 3) & 3;
+      if (collides(g.board, g.type, g.rot, g.row, g.col)) g.rot = pre;
+    }
+    if (pressed.right) { g.sticky = C.DAS_DELAY; tryShift(g, 1); return; }
+    if (held.right) {
+      g.sticky = (g.sticky - 1) & 0xff;
+      if (g.sticky !== 0) return;
+      g.sticky = C.DAS_REPEAT; tryShift(g, 1); return;
+    }
+    if (pressed.left) { g.sticky = C.DAS_DELAY; tryShift(g, -1); return; }
+    if (held.left) {
+      g.sticky = (g.sticky - 1) & 0xff;
+      if (g.sticky !== 0) return;
+      g.sticky = C.DAS_REPEAT; tryShift(g, -1); return;
+    }
+    g.sticky = C.DAS_DELAY;
+  }
+
+  // IGF $20c2..$2125: move down one row, lock on collision.
+  function moveDown(g, events) {
+    // A hidden piece has its sprites off screen, so the ROM move has no effect.
+    if (!g.active) return;
+    g.row++;
+    if (!collides(g.board, g.type, g.rot, g.row, g.col)) return;
+    g.row--;
+    g.fall = FALL_HIT;
+    g.canPressDown = 1;
+    if (g.holdCount !== 0) {
+      // IGF $2126: A-Type adds (held steps - 1) points, not multiplied by level.
+      addScore(g, g.holdCount - 1);
+      g.shownScore = g.score;
+      g.holdCount = 0;
+    }
+    if (g.row === SPAWN_ROW && g.col === SPAWN_COL) {
+      // IGF $210f: the first lock at the spawn position is skipped once.
+      if (g.stuck === 1) {
+        g.over = true;
+        events.push({ type: 'gameOver' });
+      } else {
+        g.stuck++;
+      }
+    }
+  }
+
+  // IGF InGameHandlePieceFalling ($2071, entry .start $209c).
+  function handleFalling(g, pressed, held, events) {
+    var downOnly = held.down && !held.left && !held.right;
+    if (downOnly && !(g.canPressDown !== 0 && !pressed.down)) {
+      g.canPressDown = 0;
+      if (g.timer2 !== 0 || g.fall !== FALL_NONE || g.shift !== SHIFT_NONE) return;
+      g.timer2 = C.SOFT_DROP_INTERVAL;
+      g.holdCount = (g.holdCount + 1) & 0xff;
+      moveDown(g, events);
+      return;
+    }
+    g.holdCount = 0;
+    if (g.gravCounter !== 0) { g.gravCounter--; return; }
+    if (g.fall === FALL_PROCESSED || g.shift !== SHIFT_NONE) return;
+    g.gravCounter = g.gravReload;
+    moveDown(g, events);
+  }
+
+  // IGF InGameCheckIfAnyTetrisRowsComplete ($213e).
+  function checkRows(g, events) {
+    if (g.fall !== FALL_CHECK) return;
+    g.clearRows = [];
+    for (var r = FIRST_CHECKED_ROW; r < H; r++) {
+      var full = true;
+      for (var c = 0; c < W; c++) if (g.board[idx(r, c)] === EMPTY) { full = false; break; }
+      if (full) g.clearRows.push(r);
+    }
+    g.fall = FALL_PROCESSED;
+    g.timer1 = CHECK_WAIT;
+    var n = g.clearRows.length;
+    if (n === 0) return;
+    g.lines = Math.min(g.lines + n, C.MAX_LINES);
+    g.pendingClear = n;
+    events.push({ type: 'clear', count: n, rows: g.clearRows.slice() });
+  }
+
+  // IGF InGameAddPieceToVram ($25a1).
+  function addPiece(g, events) {
+    if (g.fall !== FALL_HIT) return;
+    var cs = PIECES[g.type][g.rot];
+    for (var i = 0; i < 4; i++) {
+      var r = g.row + cs[i][0], c = g.col + cs[i][1];
+      g.board[idx(r, c)] = cs[i][2];
+      if (r >= 0) g.vram[r * W + c] = cs[i][2];
+    }
+    g.fall = FALL_CHECK;
+    g.active = false;
+    events.push({ type: 'lock', piece: g.type });
+  }
+
+  // IGF ShiftEntireGameRamBufferDownARow ($224d). Rows are processed top to
+  // bottom; each shift copies rows 0..r-1 down by one, then row 0 is cleared once.
+  function shiftRam(g) {
+    if (g.timer1 !== 0 || g.shift !== SHIFT_RAM) return;
+    for (var k = 0; k < g.clearRows.length; k++) {
+      for (var r = g.clearRows[k]; r >= 1; r--) {
+        for (var c = 0; c < W; c++) g.board[idx(r, c)] = g.board[idx(r - 1, c)];
+      }
+    }
+    for (var c2 = 0; c2 < W; c2++) g.board[idx(0, c2)] = EMPTY;
+    g.clearRows = [];
+    g.shift = SHIFT_ROW_START;
+  }
+
+  // B0 AddOnCompletedLinesScore ($1f91): score at the pre-clear level.
+  function addLineScore(g) {
+    if (g.shift !== SCORE_SHIFT_STATE || g.pendingClear === 0) return;
+    var base = C.LINE_SCORES[g.pendingClear - 1];
+    g.pendingClear = 0;
+    addScore(g, base * (g.level + 1));
+  }
+
+  // IGF CheckIfATypeNextLevelReached ($244b).
+  function checkLevel(g, events) {
+    if (g.level === C.MAX_LEVEL) return;
+    if (g.lines >= LEVEL_LINES_LIMIT) return;
+    if (Math.floor(g.lines / 10) <= g.level) return;
+    g.level++;
+    g.gravReload = gravityReload(g.level);
+    g.gravCounter = g.gravReload;
+    events.push({ type: 'levelUp', level: g.level });
+  }
+
+  // IGF FlashCompletedTetrisRows ($21e0), run in VBlank.
+  function flashRows(g, events) {
+    if (g.fall !== FALL_PROCESSED || g.timer1 !== 0) return;
+    var rows = g.clearRows, k, c;
+    if ((g.flashCount & 1) === 0) {
+      if (rows.length === 0) {
+        loadNext(g);
+        g.fall = FALL_NONE;
+        events.push({ type: 'spawn', piece: g.type });
+        return;
+      }
+      var tile = g.flashCount === FLASH_PHASES - 1 ? EMPTY : TILE_FLASH;
+      for (k = 0; k < rows.length; k++) for (c = 0; c < W; c++) g.vram[rows[k] * W + c] = tile;
+    } else {
+      for (k = 0; k < rows.length; k++) for (c = 0; c < W; c++) g.vram[rows[k] * W + c] = g.board[idx(rows[k], c)];
+    }
+    g.flashCount++;
+    if (g.flashCount === FLASH_PHASES) {
+      g.flashCount = 0;
+      g.timer1 = SHIFT_WAIT;
+      g.shift = SHIFT_RAM;
+      g.fall = FALL_NONE;
+    } else {
+      g.timer1 = FLASH_INTERVAL;
+    }
+  }
+
+  // IGF CopyRamBufferRow17ToVram..Row0ToVram, one row per VBlank, bottom first.
+  function copyRows(g, events) {
+    if (g.shift < SHIFT_ROW_START) return;
+    var r = H - 1 - (g.shift - SHIFT_ROW_START);
+    for (var c = 0; c < W; c++) g.vram[r * W + c] = g.board[idx(r, c)];
+    g.shift++;
+    if (r === LEVEL_CHECK_ROW) checkLevel(g, events);
+    if (r === 2) g.shownScore = g.score;
+    if (r === 0) {
+      g.canPressDown = 1;
+      g.shift = SHIFT_NONE;
+      g.shownLines = g.lines;
+      loadNext(g);
+      events.push({ type: 'spawn', piece: g.type });
+    }
+  }
+
+  // input: { left, right, down } held this frame, rotate true on the press frame.
+  function step(g, input) {
+    var events = [];
+    if (g.over) return events;
+    var held = { left: !!input.left, right: !!input.right, down: !!input.down };
+    var pressed = {
+      left: held.left && !g.held.left,
+      right: held.right && !g.held.right,
+      down: held.down && !g.held.down
+    };
+    g.held = held;
+    checkButtons(g, pressed, held, !!input.rotate);
+    handleFalling(g, pressed, held, events);
+    checkRows(g, events);
+    addPiece(g, events);
+    shiftRam(g);
+    addLineScore(g);
+    if (g.timer1 > 0) g.timer1--;
+    if (g.timer2 > 0) g.timer2--;
+    g.frame++;
+    if (g.over) return events;
+    flashRows(g, events);
+    copyRows(g, events);
+    return events;
+  }
+
+  // Cells of the falling piece in field coordinates, or [] when hidden.
+  function activeCells(g) {
+    if (!g.active) return [];
+    return PIECES[g.type][g.rot].map(function (c) {
+      return { row: g.row + c[0], col: g.col + c[1], tile: c[2] };
+    });
+  }
+
+  return {
+    PIECES: PIECES,
+    SPAWN_ROW: SPAWN_ROW,
+    SPAWN_COL: SPAWN_COL,
+    EMPTY: EMPTY,
+    TILE_FLASH: TILE_FLASH,
+    idx: idx,
+    cells: cells,
+    collides: collides,
+    createGame: createGame,
+    step: step,
+    activeCells: activeCells,
+    loadNext: loadNext
+  };
+})();
 
 /* ===== DATA ===== */
 
