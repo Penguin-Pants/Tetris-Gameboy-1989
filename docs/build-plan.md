@@ -556,7 +556,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | 3 | ✅ Done (owner check open) | See 12.3 |
 | 4 | ✅ Done | See 12.4 |
 | 5 | ✅ Done (owner check open) | See 12.5 |
-| 6 | Not started | |
+| 6 | ✅ Done | See 12.6 |
 | 7 | Not started | |
 | 8 | Not started | |
 | 9 | Not started | |
@@ -606,4 +606,12 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - Cleanup: the Phase 4 restart stub is removed.
 - Validation: `npm test` 77/77 pass (navigation over all cells, transition table, banner timing, golden framebuffers). `npm run test:e2e` 12/12 pass (level 5 start shows LEVEL 5 and level 5 gravity; game over returns to the title).
 - Open: owner side-by-side check of the title and A-TYPE screens (L3). The title art is approximate by design (requirements part 3).
+- Blockers: none.
+
+### 12.6 Phase 6
+
+- Done: `APP.createStore` storage adapter (backend injected, probe at start, every access guarded, schema-checked loads, in-memory fallback, `ok` flag). Keys use the `gbtetris.v1.` prefix. Score list logic: `qualifies`, `rankOf` (ties below older equal scores), `insertScore` (keeps 10), `validateScores`. Name entry: ROM character order A..Z . - multiply blank, Up/Down with the ROM 23/9 hold repeat, Left/Right cursor, Start confirms, untouched places stay dotted. Top 10 screen on H from the title only; Esc or Start exits (I5). Level select shows the first 3 entries (I1). Game over: banner, then name entry if qualified, save, title.
+- `#notice` "Scores not saved" shows when storage fails (styled in Phase 9).
+- Decision: corrupt stored data falls back to defaults without the notice, because the next save still works. The notice means "this session cannot save".
+- Validation: `npm test` 91/91 pass. `npm run test:e2e` 16/16 pass, 48/48 with `--repeat-each 3` (real top-out with stubbed `Math.random`, name entry, reload, Top 10 and top-3 panel match reference renders; blocked storage shows the notice).
 - Blockers: none.
