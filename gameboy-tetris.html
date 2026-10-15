@@ -30,14 +30,96 @@
 <title>TETRIS</title>
 <style>
 /* ===== HEAD/CSS ===== */
-html, body { margin: 0; height: 100%; overflow: hidden; background: #4e4e4e; }
-#screen { display: block; margin: 0 auto; image-rendering: pixelated; }
+/* Device sizes use --u: one unit is 1/90 of the body width (body is 90 x 148
+   units, the classic handheld ratio). PLATFORM.fitDevice sets --u. */
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  display: flex; flex-direction: column; background: #24272b; color: #e8e6e1;
+  font-family: "Trebuchet MS", Verdana, sans-serif;
+}
+#stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; }
+#device {
+  --u: 4px;
+  position: relative; flex: none; width: calc(var(--u) * 90); height: calc(var(--u) * 148);
+  background: linear-gradient(160deg, #d4d2ce, #bdbab5);
+  border-radius: calc(var(--u) * 3) calc(var(--u) * 3) calc(var(--u) * 15) calc(var(--u) * 3);
+  box-shadow: inset calc(var(--u) * -0.6) calc(var(--u) * -0.8) 0 rgba(0, 0, 0, 0.18),
+    0 calc(var(--u) * 1) calc(var(--u) * 3) rgba(0, 0, 0, 0.45);
+  pointer-events: none; user-select: none;
+}
+#device .groove { position: absolute; top: calc(var(--u) * 5); left: 0; right: 0; height: calc(var(--u) * 0.4); background: #a9a6a1; }
+#device .groove.l { left: calc(var(--u) * 4); width: calc(var(--u) * 3); right: auto; top: 0; height: calc(var(--u) * 5); width: calc(var(--u) * 0.4); }
+#device .groove.r { left: auto; right: calc(var(--u) * 4); top: 0; height: calc(var(--u) * 5); width: calc(var(--u) * 0.4); }
+#device .power { position: absolute; top: calc(var(--u) * 1.6); left: calc(var(--u) * 9); font-size: calc(var(--u) * 1.8); color: #77746f; letter-spacing: calc(var(--u) * 0.2); }
+#bezel {
+  position: absolute; left: calc(var(--u) * 7); top: calc(var(--u) * 9); width: calc(var(--u) * 76); height: calc(var(--u) * 58);
+  background: #5f6174;
+  border-radius: calc(var(--u) * 2) calc(var(--u) * 2) calc(var(--u) * 9) calc(var(--u) * 2);
+}
+#bezel .stripe { position: absolute; left: calc(var(--u) * 3); right: calc(var(--u) * 3); top: calc(var(--u) * 3); height: calc(var(--u) * 0.5); background: #8c2a5b; }
+#bezel .stripe.b { top: calc(var(--u) * 4.2); background: #2d2f7a; }
+#bezel .caption {
+  position: absolute; top: calc(var(--u) * 2.6); left: 50%; transform: translateX(-50%);
+  padding: 0 calc(var(--u) * 1); background: #5f6174; color: #d9d7e6; white-space: nowrap;
+  font-size: calc(var(--u) * 1.7); letter-spacing: calc(var(--u) * 0.15);
+}
+#bezel .led { position: absolute; left: calc(var(--u) * 5); top: calc(var(--u) * 21); width: calc(var(--u) * 2.2); height: calc(var(--u) * 2.2); border-radius: 50%; background: #e3242b; box-shadow: 0 0 calc(var(--u) * 1) #ff4b4b; }
+#bezel .battery { position: absolute; left: calc(var(--u) * 2.2); top: calc(var(--u) * 25); font-size: calc(var(--u) * 1.5); color: #d9d7e6; }
+#screen {
+  position: absolute; left: calc(var(--u) * 14); top: calc(var(--u) * 8);
+  width: calc(var(--u) * 48); height: calc(var(--u) * 43.2);
+  image-rendering: pixelated; image-rendering: crisp-edges; background: #ffed79;
+}
+#device .brand { position: absolute; left: calc(var(--u) * 7); top: calc(var(--u) * 69.5); color: #2b2f84; font-size: calc(var(--u) * 4.6); white-space: nowrap; }
+#device .brand b { font-weight: 800; letter-spacing: calc(var(--u) * -0.1); }
+#device .brand i { font-weight: 700; font-style: italic; margin-left: calc(var(--u) * 1.2); }
+#device .brand sup { font-size: calc(var(--u) * 1.6); }
+.dpad { position: absolute; left: calc(var(--u) * 8); top: calc(var(--u) * 84); width: calc(var(--u) * 22); height: calc(var(--u) * 22); }
+.dpad span { position: absolute; background: #2a2b30; border-radius: calc(var(--u) * 0.8); box-shadow: inset calc(var(--u) * -0.4) calc(var(--u) * -0.4) 0 #111; }
+.dpad .h { left: 0; top: calc(var(--u) * 7.5); width: calc(var(--u) * 22); height: calc(var(--u) * 7); }
+.dpad .v { left: calc(var(--u) * 7.5); top: 0; width: calc(var(--u) * 7); height: calc(var(--u) * 22); }
+.ab { position: absolute; left: calc(var(--u) * 54); top: calc(var(--u) * 84); width: calc(var(--u) * 32); height: calc(var(--u) * 20); transform: rotate(-25deg); }
+.ab .btn { position: absolute; top: calc(var(--u) * 4); width: calc(var(--u) * 10); height: calc(var(--u) * 10); border-radius: 50%; background: #9c2459; box-shadow: inset calc(var(--u) * -0.6) calc(var(--u) * -0.8) 0 #5c1234; }
+.ab .btn.b { left: 0; } .ab .btn.a { left: calc(var(--u) * 15); }
+.ab .lbl { position: absolute; top: calc(var(--u) * 15.5); font-size: calc(var(--u) * 2.6); color: #2b2f84; font-weight: 700; }
+.ab .lbl.b { left: calc(var(--u) * 3.8); } .ab .lbl.a { left: calc(var(--u) * 18.8); }
+.ss { position: absolute; left: calc(var(--u) * 27); top: calc(var(--u) * 116); width: calc(var(--u) * 30); height: calc(var(--u) * 8); transform: rotate(-25deg); }
+.ss .pill { position: absolute; top: 0; width: calc(var(--u) * 9); height: calc(var(--u) * 2.6); border-radius: calc(var(--u) * 1.3); background: #8d8a93; box-shadow: inset 0 calc(var(--u) * -0.4) 0 #5f5c65; }
+.ss .pill.sel { left: 0; } .ss .pill.st { left: calc(var(--u) * 13); }
+.ss .lbl { position: absolute; top: calc(var(--u) * 3.6); font-size: calc(var(--u) * 1.9); color: #2b2f84; font-weight: 700; letter-spacing: calc(var(--u) * 0.1); }
+.ss .lbl.sel { left: calc(var(--u) * 0.3); } .ss .lbl.st { left: calc(var(--u) * 14); }
+.speaker { position: absolute; left: calc(var(--u) * 64); top: calc(var(--u) * 120); width: calc(var(--u) * 22); height: calc(var(--u) * 20); transform: rotate(-30deg); }
+.speaker span { position: absolute; top: 0; width: calc(var(--u) * 1.4); height: calc(var(--u) * 16); border-radius: calc(var(--u) * 0.7); background: #8f8c87; box-shadow: inset calc(var(--u) * 0.3) calc(var(--u) * 0.3) 0 #5e5b57; }
+#legend {
+  flex: none; display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+  gap: 2px 14px; padding: 6px 10px; background: #17191c; font-size: 13px; line-height: 1.35;
+}
+#legend kbd { font-family: inherit; font-weight: 700; color: #ffed79; }
+#legend .item { white-space: nowrap; }
+#notice { margin: 0; color: #ff8a80; font-weight: 700; white-space: nowrap; }
+#notice[hidden] { display: none; }
 </style>
 </head>
 <body>
 <!-- ===== DOM shell ===== -->
-<canvas id="screen" width="160" height="144"></canvas>
-<p id="notice" hidden>Scores not saved</p>
+<main id="stage">
+  <div id="device">
+    <span class="groove"></span><span class="groove l"></span><span class="groove r"></span>
+    <span class="power">&#9664;OFF&#8226;ON&#9654;</span>
+    <div id="bezel">
+      <span class="stripe"></span><span class="stripe b"></span>
+      <span class="caption">DOT MATRIX WITH STEREO SOUND</span>
+      <span class="led"></span><span class="battery">BATTERY</span>
+      <canvas id="screen" width="160" height="144" aria-label="Tetris game screen"></canvas>
+    </div>
+    <div class="brand"><b>Nintendo</b><i>GAME BOY</i><sup>TM</sup></div>
+    <div class="dpad"><span class="h"></span><span class="v"></span></div>
+    <div class="ab"><span class="btn b"></span><span class="btn a"></span><span class="lbl b">B</span><span class="lbl a">A</span></div>
+    <div class="ss"><span class="pill sel"></span><span class="pill st"></span><span class="lbl sel">SELECT</span><span class="lbl st">START</span></div>
+    <div class="speaker"><span style="left:0"></span><span style="left:20%"></span><span style="left:40%"></span><span style="left:60%"></span><span style="left:80%"></span><span style="left:100%"></span></div>
+  </div>
+</main>
+<footer id="legend"><span id="legend-items"></span><p id="notice" hidden>Scores not saved</p></footer>
 
 <script>
 /* ==BEGIN LOGIC== */
@@ -1540,6 +1622,18 @@ GB.APP = (function () {
     return app.play.paused ? 'pause' : 'play';
   }
 
+  // Legend text outside the screen (requirements 5): fixed hotkeys, current
+  // bindings and the music state. Returns [[key, what], ...].
+  function legendItems(bindings, musicOn) {
+    return [
+      ['H', 'Top 10'], ['K', 'Keys'],
+      [keyLabel(bindings.left), 'Left'], [keyLabel(bindings.right), 'Right'],
+      [keyLabel(bindings.down), 'Drop'], [keyLabel(bindings.rotate), 'Rotate'],
+      [keyLabel(bindings.start), 'Start/Pause'],
+      [keyLabel(bindings.music), 'Music ' + (musicOn ? 'ON' : 'OFF')]
+    ];
+  }
+
   // ---- Screen state machine. ----
   // Screens: title, levelSelect, play, gameOver. Each has enter, update and
   // render. opts.rng feeds the randomizer.
@@ -1687,6 +1781,7 @@ GB.APP = (function () {
     KEY_ROWS: KEY_ROWS,
     createKeysScreen: createKeysScreen,
     createSequencer: createSequencer,
+    legendItems: legendItems,
     midiToHz: midiToHz,
     musicMode: musicMode,
     GAME_OVER_FRAMES: GAME_OVER_FRAMES,
@@ -1741,14 +1836,42 @@ var PLATFORM = (function () {
     return { fb: fb, resize: resize, present: present };
   }
 
-  // Fits the canvas to the window, keeping the 160:144 aspect.
-  function fitToWindow(canvas, screen) {
-    var w = window.innerWidth, h = window.innerHeight;
-    var s = Math.min(w / SW, h / SH);
-    var cssW = Math.floor(SW * s), cssH = Math.floor(SH * s);
-    canvas.style.width = cssW + 'px';
-    canvas.style.height = cssH + 'px';
-    screen.resize(cssW, cssH);
+  // Device units (requirements 2.7): the body keeps its 90:148 aspect and
+  // fits the stage (window minus legend). The canvas backing store then
+  // takes the largest integer scale of its shown size in device pixels.
+  var DEVICE_W = 90, DEVICE_H = 148;
+
+  function fitDevice(stage, device, canvas, screen) {
+    function fit() {
+      var u = Math.min(stage.clientWidth / DEVICE_W, stage.clientHeight / DEVICE_H) * 0.96;
+      device.style.setProperty('--u', Math.max(1, u) + 'px');
+      var dpr = window.devicePixelRatio || 1;
+      screen.resize(canvas.clientWidth * dpr, canvas.clientHeight * dpr);
+    }
+    fit();
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(stage);
+    window.addEventListener('resize', fit);
+  }
+
+  // Legend: rebuilt only when the bindings or music state change.
+  function createLegend(el) {
+    var last = '';
+    return function update(items) {
+      var sig = JSON.stringify(items);
+      if (sig === last) return;
+      last = sig;
+      el.textContent = '';
+      items.forEach(function (it) {
+        var span = document.createElement('span');
+        span.className = 'item';
+        var k = document.createElement('kbd');
+        k.textContent = it[0];
+        span.appendChild(k);
+        span.appendChild(document.createTextNode(' ' + it[1]));
+        el.appendChild(span);
+        el.appendChild(document.createTextNode(' '));
+      });
+    };
   }
 
   // Runs app.step() at the fixed game rate and app.render(fb) once per
@@ -1902,8 +2025,8 @@ var PLATFORM = (function () {
   }
 
   return {
-    createScreen: createScreen, fitToWindow: fitToWindow, startLoop: startLoop, bindInput: bindInput,
-    createAudio: createAudio
+    createScreen: createScreen, fitDevice: fitDevice, createLegend: createLegend,
+    startLoop: startLoop, bindInput: bindInput, createAudio: createAudio
   };
 })();
 
@@ -1913,8 +2036,8 @@ var PLATFORM = (function () {
   var canvas = document.getElementById('screen');
   var notice = document.getElementById('notice');
   var screen = PLATFORM.createScreen(canvas);
-  PLATFORM.fitToWindow(canvas, screen);
-  window.addEventListener('resize', function () { PLATFORM.fitToWindow(canvas, screen); });
+  PLATFORM.fitDevice(document.getElementById('stage'), document.getElementById('device'), canvas, screen);
+  var legend = PLATFORM.createLegend(document.getElementById('legend-items'));
 
   var store = GB.APP.createStore(function () { return window.localStorage; });
   var app = GB.APP.createApp({ rng: Math.random, store: store });
@@ -1930,6 +2053,7 @@ var PLATFORM = (function () {
     render: function (fb) {
       app.render(fb);
       notice.hidden = store.ok;
+      legend(GB.APP.legendItems(app.bindings, app.musicOn));
     }
   }, screen);
   PLATFORM.bindInput(input, function () {

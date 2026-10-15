@@ -1,6 +1,6 @@
 # Game Boy Tetris (1989) Clone: Build Plan
 
-**Status:** Ready for implementation. No blocking questions.
+**Status:** Implemented. Phases 1 to 9 done. Owner checks open (part 12.10).
 **Date:** 2026-10-15
 **Source of truth:** `gameboy-tetris-requirements.md` (copy it to `docs/requirements.md` in Phase 1)
 **Scope of this document:** Plan only. No code.
@@ -559,7 +559,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | 6 | ✅ Done | See 12.6 |
 | 7 | ✅ Done | See 12.7 |
 | 8 | ✅ Done (owner listening check open) | See 12.8 |
-| 9 | Not started | |
+| 9 | ✅ Done (owner review open) | See 12.9 |
 
 ### 12.1 Phase 1
 
@@ -628,3 +628,52 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - Validation: `npm test` 108/108 pass. `npm run test:e2e` 25/25 pass, 50/50 with `--repeat-each 2` (stubbed AudioContext: no context before the first key, no notes on the title, notes in play, suspend on pause, none after game over, none while off, state after reload; no WebAudio; real WebAudio without errors).
 - Open: owner listening check for tempo and tone (A2).
 - Blockers: none.
+
+### 12.9 Phase 9
+
+- Done: CSS Game Boy body (grooves, OFF/ON label, bezel with stripes and caption, power LED and BATTERY label, screen opening, wordmark, D-pad, A and B with labels, SELECT and START with labels, speaker slots). All decorative (`pointer-events: none`). Body is 90 x 148 units; `PLATFORM.fitDevice` sets `--u` from the stage (window minus legend) and a `ResizeObserver` feeds the integer canvas scaler. Legend strip (real text) shows H, K, the six current bindings and music ON or OFF; it updates on change. The "Scores not saved" notice sits in the legend. Canvas has an `aria-label`.
+- Validation: `npm test` 109/109 pass. `npm run test:e2e` 32/32 pass, 64/64 with `--repeat-each 2`: no scrollbars, device aspect within 1%, four colors only, legend and notice inside the viewport at 1920x1080, 1366x768, 800x600 and 360x640; legend updates after a remap and a music toggle; full flow (title, level 5, real top-out, name entry, H, K) with zero requests and a clean console.
+- Blockers: none.
+
+### 12.10 Overall status
+
+**Requirements traceability: verification done**
+
+| ID | Verified by |
+|---|---|
+| D1 | e2e `load`, `shell` full flow: `file://`, zero requests, clean console. One HTML file, no `<link>`, no external `src` |
+| D2 | unit `repo.test.mjs` |
+| D3 | Review: art is code (`DATA`, `VIEW` primitives), music is synthesized; no asset files |
+| F1 | unit `app.test.mjs` title golden and 2 PLAYER check. Owner visual check open |
+| F2 | unit navigation over all cells; e2e `flow` |
+| F3 | e2e `flow` LEVEL 5 render and gravity |
+| F4 | unit `scores.test.mjs`; e2e `scores` |
+| F5 | unit and e2e H on the title only |
+| F6 | unit and e2e K on the title only |
+| F7 | unit `view.test.mjs` layout and goldens. Owner visual check open |
+| G1 to G10 | unit `rules.test.mjs` (named per ID) |
+| G5 loop | unit ticker fake-clock tests |
+| G7 in play | e2e `input` 23/9 pattern |
+| K1, K3, K4 | unit `keys.test.mjs`; e2e `keys` |
+| K2, K5 | unit `input.test.mjs`; e2e `input`; no pointer handlers |
+| H1 to H4 | unit `scores.test.mjs`; e2e `scores` |
+| A1 to A5 | unit `music.test.mjs`; e2e `music` (stubbed and real AudioContext). Owner listening check open |
+| L1, L2 | unit palette and shade tests; e2e four-color checks |
+| L3 | unit layout structure (within 1 tile of the ROM layout). Owner side-by-side open |
+| L4 | e2e `shell` decorative check. Owner review open |
+| L5 | e2e `shell` viewport matrix |
+| E1, E2 | unit fake storage; e2e blocked storage, reload |
+| E3, E4 | unit matrices |
+| E5 | unit and e2e blur and hidden tab; music suspend |
+| E6 | unit and e2e repeat ignored |
+| E7 | unit `legendItems`; e2e legend update |
+| C1 | Title, notice and shell kept. Owner review open |
+| C2 | All e2e on Chromium (Playwright 1.56.1) |
+
+**Owner checks still open (manual, cannot be automated):** L3 side-by-side of play, title and A-TYPE screens; L4 shell look; A2 music tempo and tone; key feel.
+
+**Proposed follow-up work (out of scope, not implemented):**
+
+1. Snap the screen to a whole-number scale when the remainder is large. At 1366x768 the integer factor is 1 and CSS stretches by about 1.4, so pixel widths are uneven (crisp, four colors, but not uniform).
+2. Confirm the three unverified ROM assumptions in an emulator debugger: hidden-piece start value, repeat counter start value, and that a hidden piece's gravity move has no effect.
+3. Input keeps one press edge per action per frame. Two different keys pressed inside one 16 ms frame on the name entry or Keys screen can drop one. A per-event queue would fix it.

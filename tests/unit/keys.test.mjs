@@ -132,3 +132,12 @@ test('Golden framebuffer: Keys screen', () => {
 
 // Regression guard only.
 const GOLDEN = 'da7e849b';
+
+test('E7: legend items show H, K, the six bindings and the music state', () => {
+  const items = A.legendItems({ ...D, rotate: 'Space' }, false);
+  assert.deepEqual(items, [
+    ['H', 'Top 10'], ['K', 'Keys'], ['LEFT', 'Left'], ['RIGHT', 'Right'], ['DOWN', 'Drop'],
+    ['SPACE', 'Rotate'], ['ENTER', 'Start/Pause'], ['M', 'Music OFF']
+  ]);
+  assert.equal(A.legendItems(D, true)[7][1], 'Music ON');
+});
