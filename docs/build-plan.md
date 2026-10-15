@@ -553,7 +553,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 |---|---|---|
 | 1 | ✅ Done | See 12.1 |
 | 2 | ✅ Done | See 12.2 |
-| 3 | Not started | |
+| 3 | ✅ Done (owner check open) | See 12.3 |
 | 4 | Not started | |
 | 5 | Not started | |
 | 6 | Not started | |
@@ -582,4 +582,12 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - ROM quirks kept on purpose (G10): rows 0 and 1 are never checked for completion; a spawned piece can overlap the stack; a cell locked in hidden row -1 stays there.
 - Unverified assumptions (comments in code): hidden piece and repeat counter start values at game start; a hidden piece's gravity move has no effect. Verify by tracing the ROM in an emulator debugger.
 - Validation: `npm test` 45/45 pass. Tests: every G1 to G10 item, 1,000,000-draw randomizer share, fuzz (40 random and 5 bot games), 3 bot replays with golden score and board hash.
+- Blockers: none.
+
+### 12.3 Phase 3
+
+- Done: `DATA` holds hand-drawn block tiles (keyed by ROM tile id), brick wall, panel frames, a 7x7 bold font (A-Z, 0-9, `. - : ! ©`, multiply sign, cursor, arrows, dotted blank) and the play layout as text. `VIEW` has framebuffer, blitter, text, right-aligned numbers and the play screen. `APP.createTicker` is the fixed-timestep accumulator (cap 5, backlog dropped). `PLATFORM` converts the framebuffer to the canvas at an integer factor.
+- The page now runs an attract game with no input that restarts after game over.
+- Validation: `npm test` 56/56 pass. `npm run test:e2e` 4/4 pass (four colors only at 1920x1080, 1024x700 and 360x640).
+- Open: owner side-by-side check of the play screen against the screenshots (L3).
 - Blockers: none.

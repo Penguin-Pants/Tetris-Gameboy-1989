@@ -30,8 +30,8 @@
 <title>TETRIS</title>
 <style>
 /* ===== HEAD/CSS ===== */
-html, body { margin: 0; height: 100%; overflow: hidden; background: #ffed79; }
-#screen { display: block; width: 160px; height: 144px; image-rendering: pixelated; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #4e4e4e; }
+#screen { display: block; margin: 0 auto; image-rendering: pixelated; }
 </style>
 </head>
 <body>
@@ -479,10 +479,360 @@ GB.RULES = (function () {
 })();
 
 /* ===== DATA ===== */
+// All art is redrawn by hand as text. Shade keys: '.' lightest, '+' light-mid,
+// 'o' dark-mid, '#' darkest. Tile positions follow the ROM layouts
+// (disasm/data/layout_*.bin); the pixels are not copied from the ROM.
+GB.DATA = (function () {
+  'use strict';
+  var SHADE = { '.': 0, '+': 1, 'o': 2, '#': 3 };
+
+  function compile(rows) {
+    if (rows.length !== 8) throw new Error('tile needs 8 rows');
+    var t = new Uint8Array(64);
+    for (var y = 0; y < 8; y++) {
+      if (rows[y].length !== 8) throw new Error('tile row needs 8 pixels: ' + rows[y]);
+      for (var x = 0; x < 8; x++) {
+        var v = SHADE[rows[y][x]];
+        if (v === undefined) throw new Error('bad shade ' + rows[y][x]);
+        t[y * 8 + x] = v;
+      }
+    }
+    return t;
+  }
+
+  function solid(ch) { var r = []; for (var i = 0; i < 8; i++) r.push(ch + ch + ch + ch + ch + ch + ch + ch); return r; }
+
+  // ---- Block tiles, keyed by the ROM tile id the engine stores. ----
+  var BLOCKS = {
+    0x84: ['########', '#oooooo#', '#oooooo#', '#oooooo#', '#oooooo#', '#oooooo#', '#oooooo#', '########'], // L
+    0x81: ['########', '#++++++#', '#+####+#', '#+#..#+#', '#+#..#+#', '#+####+#', '#++++++#', '########'], // J
+    0x83: ['########', '#......#', '#.####.#', '#.####.#', '#.####.#', '#.####.#', '#......#', '########'], // O
+    0x82: ['########', '#++++++#', '#++++++#', '#++##++#', '#++##++#', '#++++++#', '#++++++#', '########'], // Z
+    0x86: ['########', '#oooooo#', '#o####o#', '#o#..#o#', '#o#..#o#', '#o####o#', '#oooooo#', '########'], // S
+    0x85: ['########', '#++++++#', '#+....+#', '#+.++#+#', '#+.++#+#', '#+####+#', '#++++++#', '########'], // T
+    // I piece: dotted bar with end caps. Horizontal left, middle, right.
+    0x8a: ['########', '#+o+++o+', '#+++o+++', '#o+++++o', '#++o++++', '#+++++o+', '#+o+o+++', '########'],
+    0x8b: ['########', '+++o+++o', '+o+++o++', '+++++++o', 'o++o++++', '++++o+o+', '+o++++++', '########'],
+    0x8f: ['########', '++o+++o#', 'o+++o++#', '+++++++#', '+o+o+++#', '++++++o#', 'o++o+++#', '########'],
+    // Vertical top, middle, bottom.
+    0x80: ['########', '#++o+o+#', '#o+++++#', '#+++o++#', '#+o+++o#', '#++++++#', '#o++o++#', '#++++++#'],
+    0x88: ['#+o+++o#', '#+++o++#', '#o+++++#', '#++o++o#', '#++++++#', '#+o++o+#', '#++++++#', '#o+++o+#'],
+    0x89: ['#++o+++#', '#o++++o#', '#+++o++#', '#+o++++#', '#+++++o#', '#o+o+++#', '#++++++#', '########'],
+    // Row-clear flash tile.
+    0x8c: solid('+')
+  };
+
+  // ---- Background tiles. ----
+  var TILES = {
+    empty: solid('.'),
+    dark: solid('#'),
+    // Brick wall: 3 tiles stacked repeat every 24 rows (layout_aTypeInGame.bin
+    // uses 3 wall tiles). Courses are 3 pixels high and offset by 2.
+    wall0: ['########', '.++#.++#', '+++#+++#', '########', '+#.++#.+', '++#+++#+', '########', '.++#.++#'],
+    wall1: ['+++#+++#', '########', '+#.++#.+', '++#+++#+', '########', '.++#.++#', '+++#+++#', '########'],
+    wall2: ['+#.++#.+', '++#+++#+', '########', '.++#.++#', '+++#+++#', '########', '+#.++#.+', '++#+++#+'],
+    // Panel box on the dark side panel.
+    boxTL: ['########', '##......', '#.oooooo', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....'],
+    boxT: ['########', '........', 'oooooooo', '........', '........', '........', '........', '........'],
+    boxTR: ['########', '......##', 'oooooo.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#'],
+    boxL: ['#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....'],
+    boxR: ['.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#'],
+    boxBL: ['#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.oooooo', '##......', '########'],
+    boxB: ['........', '........', '........', '........', '........', 'oooooooo', '........', '########'],
+    boxBR: ['.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', 'oooooo.#', '......##', '########'],
+    // Two boxes stacked with a dark gap (LEVEL over LINES).
+    boxJoinL: ['#.o.....', '#.oooooo', '##......', '########', '########', '##......', '#.oooooo', '#.o.....'],
+    boxJoin: ['........', 'oooooooo', '........', '########', '########', '........', 'oooooooo', '........'],
+    boxJoinR: ['.....o.#', 'oooooo.#', '......##', '########', '########', '......##', 'oooooo.#', '.....o.#'],
+    // SCORE box bottom over the dark-mid band under it.
+    bandL: ['#.oooooo', '##......', '########', 'oooooooo', 'oooooooo', 'oooooooo', '########', '........'],
+    band: ['oooooooo', '........', '########', 'oooooooo', 'oooooooo', 'oooooooo', '########', '........'],
+    bandR: ['oooooo.#', '......##', '########', 'oooooooo', 'oooooooo', 'oooooooo', '########', '........'],
+    // Line under the score row, back to the dark panel.
+    scoreBase: ['........', 'oooooooo', '########', '########', '########', '########', '########', '########']
+  };
+
+  // ---- Font: 1-bit glyphs, '#' ink. 7x7 in an 8x8 cell. ----
+  var FONT_SRC = {
+    'A': ['..###..', '.##.##.', '##...##', '##...##', '#######', '##...##', '##...##'],
+    'B': ['######.', '##...##', '##...##', '######.', '##...##', '##...##', '######.'],
+    'C': ['.#####.', '##...##', '##.....', '##.....', '##.....', '##...##', '.#####.'],
+    'D': ['#####..', '##..##.', '##...##', '##...##', '##...##', '##..##.', '#####..'],
+    'E': ['#######', '##.....', '##.....', '######.', '##.....', '##.....', '#######'],
+    'F': ['#######', '##.....', '##.....', '######.', '##.....', '##.....', '##.....'],
+    'G': ['.#####.', '##...##', '##.....', '##.####', '##...##', '##...##', '.#####.'],
+    'H': ['##...##', '##...##', '##...##', '#######', '##...##', '##...##', '##...##'],
+    'I': ['######.', '..##...', '..##...', '..##...', '..##...', '..##...', '######.'],
+    'J': ['..#####', '....##.', '....##.', '....##.', '##..##.', '##..##.', '.####..'],
+    'K': ['##...##', '##..##.', '##.##..', '####...', '##.##..', '##..##.', '##...##'],
+    'L': ['##.....', '##.....', '##.....', '##.....', '##.....', '##.....', '#######'],
+    'M': ['##...##', '###.###', '#######', '##.#.##', '##...##', '##...##', '##...##'],
+    'N': ['##...##', '###..##', '####.##', '##.####', '##..###', '##...##', '##...##'],
+    'O': ['.#####.', '##...##', '##...##', '##...##', '##...##', '##...##', '.#####.'],
+    'P': ['######.', '##...##', '##...##', '######.', '##.....', '##.....', '##.....'],
+    'Q': ['.#####.', '##...##', '##...##', '##...##', '##.#.##', '##..##.', '.###.##'],
+    'R': ['######.', '##...##', '##...##', '######.', '##.##..', '##..##.', '##...##'],
+    'S': ['.#####.', '##...##', '##.....', '.#####.', '.....##', '##...##', '.#####.'],
+    'T': ['######.', '..##...', '..##...', '..##...', '..##...', '..##...', '..##...'],
+    'U': ['##...##', '##...##', '##...##', '##...##', '##...##', '##...##', '.#####.'],
+    'V': ['##...##', '##...##', '##...##', '##...##', '.##.##.', '..###..', '...#...'],
+    'W': ['##...##', '##...##', '##...##', '##.#.##', '#######', '###.###', '##...##'],
+    'X': ['##...##', '.##.##.', '..###..', '..###..', '..###..', '.##.##.', '##...##'],
+    'Y': ['##..##.', '##..##.', '##..##.', '.####..', '..##...', '..##...', '..##...'],
+    'Z': ['#######', '....##.', '...##..', '..##...', '.##....', '##.....', '#######'],
+    '0': ['..###..', '.##.##.', '##...##', '##...##', '##...##', '.##.##.', '..###..'],
+    '1': ['..##...', '.###...', '..##...', '..##...', '..##...', '..##...', '.####..'],
+    '2': ['.#####.', '##...##', '.....##', '..####.', '.##....', '##.....', '#######'],
+    '3': ['.#####.', '##...##', '.....##', '..####.', '.....##', '##...##', '.#####.'],
+    '4': ['...###.', '..####.', '.##.##.', '##..##.', '#######', '....##.', '....##.'],
+    '5': ['######.', '##.....', '######.', '.....##', '.....##', '##...##', '.#####.'],
+    '6': ['.#####.', '##.....', '##.....', '######.', '##...##', '##...##', '.#####.'],
+    '7': ['#######', '##...##', '....##.', '...##..', '..##...', '..##...', '..##...'],
+    '8': ['.#####.', '##...##', '##...##', '.#####.', '##...##', '##...##', '.#####.'],
+    '9': ['.#####.', '##...##', '##...##', '.######', '.....##', '##...##', '.#####.'],
+    '.': ['.......', '.......', '.......', '.......', '.......', '..##...', '..##...'],
+    '-': ['.......', '.......', '.......', '.#####.', '.......', '.......', '.......'],
+    ':': ['.......', '..##...', '..##...', '.......', '..##...', '..##...', '.......'],
+    '!': ['..##...', '..##...', '..##...', '..##...', '.......', '..##...', '..##...'],
+    '*': ['.......', '##...##', '.##.##.', '..###..', '.##.##.', '##...##', '.......'], // multiply sign
+    '©': ['.#####.', '#.....#', '#.###.#', '#.#...#', '#.###.#', '#.....#', '.#####.'],
+    '▶': ['##.....', '####...', '######.', '#######', '######.', '####...', '##.....'], // cursor
+    '↑': ['...#...', '..###..', '.#####.', '#######', '..###..', '..###..', '..###..'],
+    '↓': ['..###..', '..###..', '..###..', '#######', '.#####.', '..###..', '...#...'],
+    '←': ['...#...', '..##...', '.######', '#######', '.######', '..##...', '...#...'],
+    '→': ['...#...', '...##..', '######.', '#######', '######.', '...##..', '...#...'],
+    '_': ['.......', '.......', '.......', '.......', '.......', '#.#.#.#', '.......'], // dotted blank
+    ' ': ['.......', '.......', '.......', '.......', '.......', '.......', '.......']
+  };
+
+  var FONT = {};
+  Object.keys(FONT_SRC).forEach(function (ch) {
+    var src = FONT_SRC[ch];
+    var g = new Uint8Array(64);
+    for (var y = 0; y < 7; y++) for (var x = 0; x < 7; x++) g[y * 8 + x] = src[y][x] === '#' ? 1 : 0;
+    FONT[ch] = g;
+  });
+
+  var compiledTiles = {};
+  Object.keys(TILES).forEach(function (k) { compiledTiles[k] = compile(TILES[k]); });
+  var compiledBlocks = {};
+  Object.keys(BLOCKS).forEach(function (k) { compiledBlocks[k] = compile(BLOCKS[k]); });
+
+  // ---- Layouts: 18 rows of 20 keys. Structure from layout_aTypeInGame.bin. ----
+  var LEGEND_PLAY = {
+    '#': 'dark', ' ': 'empty', 'a': 'wall0', 'b': 'wall1', 'c': 'wall2',
+    '[': 'boxTL', '-': 'boxT', ']': 'boxTR', '(': 'boxL', ')': 'boxR',
+    '{': 'boxBL', '_': 'boxB', '}': 'boxBR', '<': 'boxJoinL', '=': 'boxJoin', '>': 'boxJoinR',
+    'L': 'bandL', 'B': 'band', 'R': 'bandR', 'u': 'scoreBase'
+  };
+  var LAYOUT_PLAY = [
+    '#a          a[-----]',
+    '#b          b(     )',
+    '#c          cLBBBBBR',
+    '#a          a       ',
+    '#b          buuuuuuu',
+    '#c          c[-----]',
+    '#a          a(     )',
+    '#b          b(     )',
+    '#c          c<=====>',
+    '#a          a(     )',
+    '#b          b(     )',
+    '#c          c{_____}',
+    '#a          a#[----]',
+    '#b          b#(    )',
+    '#c          c#(    )',
+    '#a          a#(    )',
+    '#b          b#(    )',
+    '#c          c#{____}'
+  ];
+  // Text drawn over the play layout: [text, col, row].
+  var TEXT_PLAY = [['SCORE', 14, 1], ['LEVEL', 14, 6], ['LINES', 14, 9]];
+
+  return {
+    SHADE: SHADE,
+    compile: compile,
+    TILES: compiledTiles,
+    BLOCKS: compiledBlocks,
+    FONT: FONT,
+    LEGEND_PLAY: LEGEND_PLAY,
+    LAYOUT_PLAY: LAYOUT_PLAY,
+    TEXT_PLAY: TEXT_PLAY,
+    // Number positions (right-most digit column, row) from the ROM: score
+    // at row 3 col 18 (layout '0' tile), level ends at col 17 ($98f1), lines
+    // end at col 17 ($994e + 3 digits).
+    POS_SCORE: [18, 3],
+    POS_LEVEL: [17, 7],
+    POS_LINES: [17, 10],
+    // Next-piece origin: sprite base $80/$8f (gfx.s SpriteSpecStruct_LPieceNext)
+    // puts grid cell (r, c) at pixel (120 + 8c, 96 + 8r).
+    NEXT_X: 120,
+    NEXT_Y: 96,
+    // Field origin: tile column 2, row 0.
+    FIELD_X: 16,
+    FIELD_Y: 0
+  };
+})();
 
 /* ===== VIEW ===== */
+// Pure renderer: a 160x144 framebuffer of shade indexes 0..3.
+GB.VIEW = (function () {
+  'use strict';
+  var C = GB.CONST, D = GB.DATA, R = GB.RULES;
+  var W = C.SCREEN_W, H = C.SCREEN_H;
+
+  function createFramebuffer() { return new Uint8Array(W * H); }
+
+  function fill(fb, shade) { fb.fill(shade); }
+
+  // Draws an 8x8 tile at pixel (x, y). Pixels outside the screen are skipped.
+  function blit(fb, tile, x, y) {
+    for (var ty = 0; ty < 8; ty++) {
+      var py = y + ty;
+      if (py < 0 || py >= H) continue;
+      for (var tx = 0; tx < 8; tx++) {
+        var px = x + tx;
+        if (px < 0 || px >= W) continue;
+        fb[py * W + px] = tile[ty * 8 + tx];
+      }
+    }
+  }
+
+  function fillRect(fb, x, y, w, h, shade) {
+    for (var py = Math.max(0, y); py < Math.min(H, y + h); py++) {
+      for (var px = Math.max(0, x); px < Math.min(W, x + w); px++) fb[py * W + px] = shade;
+    }
+  }
+
+  // Draws text on the tile grid. Unknown characters draw as blanks.
+  function drawText(fb, text, col, row, fg, bg) {
+    fg = fg === undefined ? 3 : fg;
+    bg = bg === undefined ? 0 : bg;
+    var str = String(text);
+    for (var i = 0; i < str.length; i++) {
+      var g = D.FONT[str[i]] || D.FONT[' '];
+      var x0 = (col + i) * 8, y0 = row * 8;
+      for (var y = 0; y < 8; y++) {
+        var py = y0 + y;
+        if (py < 0 || py >= H) continue;
+        for (var x = 0; x < 8; x++) {
+          var px = x0 + x;
+          if (px < 0 || px >= W) continue;
+          if (bg < 0 && !g[y * 8 + x]) continue;
+          fb[py * W + px] = g[y * 8 + x] ? fg : bg;
+        }
+      }
+    }
+  }
+
+  // Right-aligned number with no leading zeros; last digit at rightCol.
+  function drawNumberRight(fb, n, rightCol, row, fg, bg) {
+    var s = String(Math.max(0, Math.floor(n)));
+    drawText(fb, s, rightCol - s.length + 1, row, fg, bg);
+  }
+
+  function drawLayout(fb, layout, legend) {
+    for (var r = 0; r < layout.length; r++) {
+      for (var c = 0; c < layout[r].length; c++) {
+        var name = legend[layout[r][c]];
+        if (!name) throw new Error('layout key ' + layout[r][c]);
+        blit(fb, D.TILES[name], c * 8, r * 8);
+      }
+    }
+  }
+
+  function drawField(fb, vram) {
+    for (var r = 0; r < C.FIELD_H; r++) {
+      for (var c = 0; c < C.FIELD_W; c++) {
+        var v = vram[r * C.FIELD_W + c];
+        blit(fb, v ? D.BLOCKS[v] : D.TILES.empty, D.FIELD_X + c * 8, D.FIELD_Y + r * 8);
+      }
+    }
+  }
+
+  function drawPiece(fb, cells, x0, y0) {
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      if (cell.row < 0) continue; // above the field: no sprite shown
+      blit(fb, D.BLOCKS[cell.tile], x0 + cell.col * 8, y0 + cell.row * 8);
+    }
+  }
+
+  // Play screen. opts.label: text centered on the field (for example PAUSE).
+  function renderPlay(fb, game, opts) {
+    opts = opts || {};
+    drawLayout(fb, D.LAYOUT_PLAY, D.LEGEND_PLAY);
+    D.TEXT_PLAY.forEach(function (t) { drawText(fb, t[0], t[1], t[2]); });
+    drawField(fb, game.vram);
+    if (!opts.hidePieces) {
+      drawPiece(fb, R.activeCells(game), D.FIELD_X, D.FIELD_Y);
+      var next = R.cells(game.preview, 0).map(function (c) { return { row: c[0], col: c[1], tile: c[2] }; });
+      drawPiece(fb, next, D.NEXT_X, D.NEXT_Y);
+    }
+    drawNumberRight(fb, game.shownScore, D.POS_SCORE[0], D.POS_SCORE[1]);
+    drawNumberRight(fb, game.level, D.POS_LEVEL[0], D.POS_LEVEL[1]);
+    drawNumberRight(fb, game.shownLines, D.POS_LINES[0], D.POS_LINES[1]);
+    if (opts.label) drawFieldLabel(fb, opts.label);
+  }
+
+  // A boxed label across the middle of the field.
+  function drawFieldLabel(fb, text) {
+    var col = 2 + Math.floor((10 - text.length) / 2);
+    fillRect(fb, 16, 60, 80, 24, 0);
+    fillRect(fb, 16, 61, 80, 1, 3);
+    fillRect(fb, 16, 82, 80, 1, 3);
+    drawText(fb, text, col, 8);
+  }
+
+  // FNV-1a hash of a framebuffer, for golden tests.
+  function hash(fb) {
+    var h = 2166136261;
+    for (var i = 0; i < fb.length; i++) { h ^= fb[i]; h = Math.imul(h, 16777619) >>> 0; }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  return {
+    createFramebuffer: createFramebuffer,
+    fill: fill,
+    blit: blit,
+    fillRect: fillRect,
+    drawText: drawText,
+    drawNumberRight: drawNumberRight,
+    drawLayout: drawLayout,
+    drawField: drawField,
+    renderPlay: renderPlay,
+    drawFieldLabel: drawFieldLabel,
+    hash: hash
+  };
+})();
 
 /* ===== APP ===== */
+GB.APP = (function () {
+  'use strict';
+  var C = GB.CONST;
+
+  // Fixed-timestep accumulator. advance(nowMs) returns how many game frames
+  // to run. Catch-up is capped; when the cap is hit (for example after a tab
+  // restore) the rest of the backlog is dropped.
+  function createTicker(fps, maxSteps) {
+    var stepMs = 1000 / (fps || C.FPS);
+    var cap = maxSteps || 5;
+    var acc = 0, last = null;
+    return {
+      advance: function (now) {
+        if (last === null) { last = now; return 0; }
+        var dt = Math.max(0, now - last);
+        last = now;
+        acc += dt;
+        var n = Math.floor(acc / stepMs);
+        if (n > cap) { n = cap; acc = 0; } else { acc -= n * stepMs; }
+        return n;
+      },
+      reset: function () { acc = 0; last = null; }
+    };
+  }
+
+  return { createTicker: createTicker };
+})();
 
 /* ==END LOGIC== */
 </script>
@@ -491,16 +841,91 @@ GB.RULES = (function () {
 /* ===== PLATFORM ===== */
 var PLATFORM = (function () {
   'use strict';
-  function clearScreen(canvas) {
-    var ctx = canvas.getContext('2d');
-    ctx.fillStyle = GB.CONST.PALETTE[0];
-    ctx.fillRect(0, 0, GB.CONST.SCREEN_W, GB.CONST.SCREEN_H);
+  var C = GB.CONST, V = GB.VIEW;
+  var SW = C.SCREEN_W, SH = C.SCREEN_H;
+
+  function rgba(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return [n >> 16, (n >> 8) & 255, n & 255, 255];
   }
-  return { clearScreen: clearScreen };
+  var PAL = C.PALETTE.map(rgba);
+
+  // Screen: framebuffer -> 160x144 ImageData -> integer-scaled visible canvas.
+  function createScreen(canvas) {
+    var off = document.createElement('canvas');
+    off.width = SW; off.height = SH;
+    var offCtx = off.getContext('2d');
+    var image = offCtx.createImageData(SW, SH);
+    var ctx = canvas.getContext('2d');
+    var fb = V.createFramebuffer();
+
+    // Backing store at the largest integer factor that fits the shown size.
+    // CSS stretches the small remainder with image-rendering: pixelated.
+    function resize(cssW, cssH) {
+      var k = Math.max(1, Math.floor(Math.min(cssW / SW, cssH / SH)));
+      if (canvas.width !== SW * k) { canvas.width = SW * k; canvas.height = SH * k; }
+    }
+
+    function present() {
+      var d = image.data;
+      for (var i = 0; i < fb.length; i++) {
+        var p = PAL[fb[i]], j = i * 4;
+        d[j] = p[0]; d[j + 1] = p[1]; d[j + 2] = p[2]; d[j + 3] = 255;
+      }
+      offCtx.putImageData(image, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+    }
+
+    return { fb: fb, resize: resize, present: present };
+  }
+
+  // Fits the canvas to the window, keeping the 160:144 aspect.
+  function fitToWindow(canvas, screen) {
+    var w = window.innerWidth, h = window.innerHeight;
+    var s = Math.min(w / SW, h / SH);
+    var cssW = Math.floor(SW * s), cssH = Math.floor(SH * s);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    screen.resize(cssW, cssH);
+  }
+
+  // Runs app.step() at the fixed game rate and app.render(fb) once per
+  // animation frame.
+  function startLoop(app, screen) {
+    var ticker = GB.APP.createTicker(C.FPS, 5);
+    function frame(now) {
+      var n = ticker.advance(now);
+      for (var i = 0; i < n; i++) app.step();
+      app.render(screen.fb);
+      screen.present();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    return ticker;
+  }
+
+  return { createScreen: createScreen, fitToWindow: fitToWindow, startLoop: startLoop };
 })();
 
 /* ===== BOOT ===== */
-PLATFORM.clearScreen(document.getElementById('screen'));
+(function () {
+  'use strict';
+  var canvas = document.getElementById('screen');
+  var screen = PLATFORM.createScreen(canvas);
+  PLATFORM.fitToWindow(canvas, screen);
+  window.addEventListener('resize', function () { PLATFORM.fitToWindow(canvas, screen); });
+
+  // Attract run: the engine plays with no input and restarts after game over.
+  var game = GB.RULES.createGame({ startLevel: 0, rng: Math.random });
+  PLATFORM.startLoop({
+    step: function () {
+      GB.RULES.step(game, {});
+      if (game.over) game = GB.RULES.createGame({ startLevel: 0, rng: Math.random });
+    },
+    render: function (fb) { GB.VIEW.renderPlay(fb, game); }
+  }, screen);
+})();
 </script>
 </body>
 </html>
