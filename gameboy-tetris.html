@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<!--
+  Game Boy Tetris (1989, A-Type) clone. One offline file. Private use only.
+
+  Sections (in order):
+    HEAD/CSS   styles
+    DOM shell  device markup
+    CONST      fixed numbers (requirements + disassembly)
+    RULES      pure game engine
+    DATA       tiles, font, layouts, music notes
+    VIEW       pure 160x144 framebuffer renderer
+    APP        pure screen state machine
+    PLATFORM   canvas, loop, keyboard, storage, audio
+    BOOT       start-up
+
+  CONST to APP sit between the LOGIC markers. They use no DOM, storage or audio.
+  Node tests load that block with tests/helpers/load-logic.mjs.
+
+  Tests:
+    npm test           unit tests (node:test, no packages)
+    npm run test:e2e   Playwright end-to-end tests (dev only)
+
+  Rule numbers not in docs/requirements.md come from the MIT-licensed
+  disassembly https://github.com/vinheim3/tetris-gb-disasm (file names cited).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TETRIS</title>
+<style>
+/* ===== HEAD/CSS ===== */
+html, body { margin: 0; height: 100%; overflow: hidden; background: #ffed79; }
+#screen { display: block; width: 160px; height: 144px; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<!-- ===== DOM shell ===== -->
+<canvas id="screen" width="160" height="144"></canvas>
+
+<script>
+/* ==BEGIN LOGIC== */
+var GB = {};
+
+/* ===== CONST ===== */
+GB.CONST = (function () {
+  return Object.freeze({
+    // Four shades, light to dark. Sampled from reference/screenshots/*.png:
+    // exact-color pixel counts over the play, title and level screenshots.
+    // Each shade is the most frequent color in a flat region, after
+    // excluding colors within RGB distance 30 of a shade already chosen
+    // (this drops the scaling blur between shades).
+    PALETTE: Object.freeze(['#ffed79', '#b4a446', '#847947', '#4e4e4e']),
+
+    SCREEN_W: 160,
+    SCREEN_H: 144,
+
+    // Requirements 2.3: frame rate and gravity (frames per row, levels 0..20).
+    FPS: 59.73,
+    GRAVITY: Object.freeze([53, 49, 45, 41, 37, 33, 28, 22, 17, 11, 10,
+      9, 8, 7, 6, 6, 5, 5, 4, 4, 3]),
+
+    // Requirements 2.3: horizontal repeat (23 from the ROM, inGameFlow.s $2517, $2525).
+    DAS_DELAY: 23,
+    DAS_REPEAT: 9,
+    // Requirements 2.3: soft drop one row every 3 frames (inGameFlow.s $2092).
+    SOFT_DROP_INTERVAL: 3,
+
+    // Requirements 2.3: clear scores, multiplied by (level + 1).
+    LINE_SCORES: Object.freeze([40, 100, 300, 1200]),
+    MAX_START_LEVEL: 9,
+    MAX_LEVEL: 20,
+    MAX_SCORE: 999999,
+    // Lines counter is 4 BCD digits (inGameFlow.s $2194).
+    MAX_LINES: 9999,
+
+    FIELD_W: 10,
+    FIELD_H: 18,
+
+    STORAGE_PREFIX: 'gbtetris.v1.'
+  });
+})();
+
+/* ===== RULES ===== */
+
+/* ===== DATA ===== */
+
+/* ===== VIEW ===== */
+
+/* ===== APP ===== */
+
+/* ==END LOGIC== */
+</script>
+
+<script>
+/* ===== PLATFORM ===== */
+var PLATFORM = (function () {
+  'use strict';
+  function clearScreen(canvas) {
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = GB.CONST.PALETTE[0];
+    ctx.fillRect(0, 0, GB.CONST.SCREEN_W, GB.CONST.SCREEN_H);
+  }
+  return { clearScreen: clearScreen };
+})();
+
+/* ===== BOOT ===== */
+PLATFORM.clearScreen(document.getElementById('screen'));
+</script>
+</body>
+</html>
