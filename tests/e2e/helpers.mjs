@@ -15,3 +15,15 @@ export async function openGame(page, { initScript } = {}) {
   await page.goto(FILE_URL);
   return { logs, requests };
 }
+
+// From the title: Enter, optional Down presses on level select, Enter.
+export async function startGame(page, { down = 0, right = 0 } = {}) {
+  await page.waitForFunction(() => window.gbApp && window.gbApp.screen === 'title');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.gbApp.screen === 'levelSelect');
+  for (let i = 0; i < down; i++) await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < right; i++) await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(100);
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.gbApp.screen === 'play');
+}

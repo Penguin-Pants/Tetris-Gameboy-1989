@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { openGame } from './helpers.mjs';
+import { openGame, startGame } from './helpers.mjs';
 
 // Wraps gbApp.step to log [engine frame, column, active] after every game frame.
 async function recordSteps(page) {
   await page.evaluate(() => {
-    const app = window.gbApp;
+    const app = window.gbApp.play;
     window.__log = [[app.game.frame, app.game.col, app.game.active]];
     const orig = app.step;
     app.step = (inp) => {
@@ -17,6 +17,7 @@ async function recordSteps(page) {
 
 test('G7/K2: holding Left moves at once, then after 23 frames, then every 9', async ({ page }) => {
   await openGame(page);
+  await startGame(page);
   await page.waitForTimeout(300);
   await recordSteps(page);
   await page.keyboard.down('ArrowLeft');
@@ -32,52 +33,56 @@ test('G7/K2: holding Left moves at once, then after 23 frames, then every 9', as
 
 test('K2: Up rotates, Down soft-drops', async ({ page }) => {
   await openGame(page);
+  await startGame(page);
   await page.waitForTimeout(300);
-  const before = await page.evaluate(() => [gbApp.game.rot, gbApp.game.row]);
+  const before = await page.evaluate(() => [gbApp.play.game.rot, gbApp.play.game.row]);
   await page.keyboard.press('ArrowUp');
   await page.keyboard.down('ArrowDown');
   await page.waitForTimeout(300);
   await page.keyboard.up('ArrowDown');
-  const after = await page.evaluate(() => [gbApp.game.rot, gbApp.game.row, gbApp.game.type]);
+  const after = await page.evaluate(() => [gbApp.play.game.rot, gbApp.play.game.row, gbApp.play.game.type]);
   if (after[2] !== 3) expect(after[0]).toBe((before[0] + 3) % 4);
   expect(after[1]).toBeGreaterThan(before[1] + 3);
 });
 
 test('I6: Enter pauses and the canvas freezes; Enter resumes', async ({ page }) => {
   await openGame(page);
+  await startGame(page);
   await page.waitForTimeout(300);
   await page.keyboard.press('Enter');
-  await expect.poll(() => page.evaluate(() => gbApp.paused)).toBe(true);
+  await expect.poll(() => page.evaluate(() => gbApp.play.paused)).toBe(true);
   await page.waitForTimeout(100);
   const grab = () => page.$eval('#screen', (c) => c.toDataURL());
   const a = await grab();
   await page.waitForTimeout(1000);
   const b = await grab();
   expect(a).toBe(b);
-  expect(await page.evaluate(() => gbApp.paused)).toBe(true);
+  expect(await page.evaluate(() => gbApp.play.paused)).toBe(true);
   await page.keyboard.press('Enter');
-  await expect.poll(() => page.evaluate(() => gbApp.paused)).toBe(false);
+  await expect.poll(() => page.evaluate(() => gbApp.play.paused)).toBe(false);
 });
 
 test('E5: a hidden tab pauses the game and clears held keys', async ({ page }) => {
   await openGame(page);
+  await startGame(page);
   await page.waitForTimeout(300);
   await page.keyboard.down('ArrowRight');
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  expect(await page.evaluate(() => gbApp.paused)).toBe(true);
-  const f = await page.evaluate(() => gbApp.game.frame);
+  expect(await page.evaluate(() => gbApp.play.paused)).toBe(true);
+  const f = await page.evaluate(() => gbApp.play.game.frame);
   await page.waitForTimeout(500);
-  expect(await page.evaluate(() => gbApp.game.frame)).toBe(f);
+  expect(await page.evaluate(() => gbApp.play.game.frame)).toBe(f);
 });
 
 test('E5: window blur pauses the game', async ({ page }) => {
   await openGame(page);
+  await startGame(page);
   await page.waitForTimeout(200);
   await page.evaluate(() => window.dispatchEvent(new Event('blur')));
-  expect(await page.evaluate(() => gbApp.paused)).toBe(true);
+  expect(await page.evaluate(() => gbApp.play.paused)).toBe(true);
 });
 
 test('K2: arrow keys do not scroll the page (default prevented)', async ({ page }) => {
@@ -92,10 +97,3 @@ test('K2: arrow keys do not scroll the page (default prevented)', async ({ page 
   expect(await page.evaluate(() => [window.scrollX, window.scrollY])).toEqual([0, 0]);
 });
 
-test('Phase 4: game over shows the label; Enter restarts', async ({ page }) => {
-  await openGame(page);
-  await page.waitForTimeout(200);
-  await page.evaluate(() => { gbApp.game.over = true; });
-  await page.keyboard.press('Enter');
-  await expect.poll(() => page.evaluate(() => gbApp.game.over)).toBe(false);
-});

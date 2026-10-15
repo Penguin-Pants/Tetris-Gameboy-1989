@@ -124,9 +124,11 @@ test('G7: play session starts at level 0 and passes the rotate edge only', () =>
   assert.equal(play.game.rot, 3);
 });
 
-test('Phase 4 stub: start restarts after game over', () => {
+test('Phase 5 cleanup: start does not restart a finished game inside play', () => {
   const play = A.createPlay({ startLevel: 0, rng: sequence([3, 3, 3, 3]) });
   play.game.over = true;
+  const g = play.game;
   play.step(frame({ start: true }));
-  assert.equal(play.game.over, false);
+  assert.equal(play.game, g);
+  assert.equal(play.game.over, true);
 });

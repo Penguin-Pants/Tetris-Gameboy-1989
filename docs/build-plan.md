@@ -555,7 +555,7 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 | 2 | ✅ Done | See 12.2 |
 | 3 | ✅ Done (owner check open) | See 12.3 |
 | 4 | ✅ Done | See 12.4 |
-| 5 | Not started | |
+| 5 | ✅ Done (owner check open) | See 12.5 |
 | 6 | Not started | |
 | 7 | Not started | |
 | 8 | Not started | |
@@ -598,4 +598,12 @@ Updated at the end of each phase. Review method: `AGENTS.md` has no `TWO-PASS RE
 - As in the ROM (`bank_000.s` `$1bce`), the unpause frame runs game logic.
 - `window.gbApp` is a read-only handle for E2E tests.
 - Validation: `npm test` 68/68 pass. `npm run test:e2e` 11/11 pass, 55/55 with `--repeat-each 5`. Hold Left gives moves 23 then 9 frames apart in the browser.
+- Blockers: none.
+
+### 12.5 Phase 5
+
+- Done: `APP.createApp` state machine with `title`, `levelSelect`, `play` and `gameOver` screens (enter, update, render). Title: redrawn logo, sky with sun, stars, onion domes and skyline, `1PLAYER` with cursor, `©1989 Nintendo`; the 2 PLAYER slot stays empty. Level select: A-TYPE label, LEVEL box, 0..9 grid with the ROM movement rules (`menuScreens.s` `GameState11_ATypeSelectionMain`), chosen digit flashes every 16 frames, TOP-SCORE box with 3 dotted rows. Game over: banner 179 frames, Start skips after 60 frames (I4), then title.
+- Cleanup: the Phase 4 restart stub is removed.
+- Validation: `npm test` 77/77 pass (navigation over all cells, transition table, banner timing, golden framebuffers). `npm run test:e2e` 12/12 pass (level 5 start shows LEVEL 5 and level 5 gravity; game over returns to the title).
+- Open: owner side-by-side check of the title and A-TYPE screens (L3). The title art is approximate by design (requirements part 3).
 - Blockers: none.
