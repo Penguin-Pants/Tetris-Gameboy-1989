@@ -1,0 +1,2068 @@
+<!DOCTYPE html>
+<!--
+  Game Boy Tetris (1989, A-Type) clone. One offline file. Private use only.
+
+  Sections (in order):
+    HEAD/CSS   styles
+    DOM shell  device markup
+    CONST      fixed numbers (requirements + disassembly)
+    RULES      pure game engine
+    DATA       tiles, font, layouts, music notes
+    VIEW       pure 160x144 framebuffer renderer
+    APP        pure screen state machine
+    PLATFORM   canvas, loop, keyboard, storage, audio
+    BOOT       start-up
+
+  CONST to APP sit between the LOGIC markers. They use no DOM, storage or audio.
+  Node tests load that block with tests/helpers/load-logic.mjs.
+
+  Tests:
+    npm test           unit tests (node:test, no packages)
+    npm run test:e2e   Playwright end-to-end tests (dev only)
+
+  Rule numbers not in docs/requirements.md come from the MIT-licensed
+  disassembly https://github.com/vinheim3/tetris-gb-disasm (file names cited).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TETRIS</title>
+<style>
+/* ===== HEAD/CSS ===== */
+/* Device sizes use --u: one unit is 1/90 of the body width (body is 90 x 148
+   units, the classic handheld ratio). PLATFORM.fitDevice sets --u. */
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  display: flex; flex-direction: column; background: #24272b; color: #e8e6e1;
+  font-family: "Trebuchet MS", Verdana, sans-serif;
+}
+#stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; }
+#device {
+  --u: 4px;
+  position: relative; flex: none; width: calc(var(--u) * 90); height: calc(var(--u) * 148);
+  background: linear-gradient(160deg, #d4d2ce, #bdbab5);
+  border-radius: calc(var(--u) * 3) calc(var(--u) * 3) calc(var(--u) * 15) calc(var(--u) * 3);
+  box-shadow: inset calc(var(--u) * -0.6) calc(var(--u) * -0.8) 0 rgba(0, 0, 0, 0.18),
+    0 calc(var(--u) * 1) calc(var(--u) * 3) rgba(0, 0, 0, 0.45);
+  pointer-events: none; user-select: none;
+}
+#device .groove { position: absolute; top: calc(var(--u) * 5); left: 0; right: 0; height: calc(var(--u) * 0.4); background: #a9a6a1; }
+#device .groove.l { left: calc(var(--u) * 4); width: calc(var(--u) * 3); right: auto; top: 0; height: calc(var(--u) * 5); width: calc(var(--u) * 0.4); }
+#device .groove.r { left: auto; right: calc(var(--u) * 4); top: 0; height: calc(var(--u) * 5); width: calc(var(--u) * 0.4); }
+#device .power { position: absolute; top: calc(var(--u) * 1.6); left: calc(var(--u) * 9); font-size: calc(var(--u) * 1.8); color: #77746f; letter-spacing: calc(var(--u) * 0.2); }
+#bezel {
+  position: absolute; left: calc(var(--u) * 7); top: calc(var(--u) * 9); width: calc(var(--u) * 76); height: calc(var(--u) * 58);
+  background: #5f6174;
+  border-radius: calc(var(--u) * 2) calc(var(--u) * 2) calc(var(--u) * 9) calc(var(--u) * 2);
+}
+#bezel .stripe { position: absolute; left: calc(var(--u) * 3); right: calc(var(--u) * 3); top: calc(var(--u) * 3); height: calc(var(--u) * 0.5); background: #8c2a5b; }
+#bezel .stripe.b { top: calc(var(--u) * 4.2); background: #2d2f7a; }
+#bezel .caption {
+  position: absolute; top: calc(var(--u) * 2.6); left: 50%; transform: translateX(-50%);
+  padding: 0 calc(var(--u) * 1); background: #5f6174; color: #d9d7e6; white-space: nowrap;
+  font-size: calc(var(--u) * 1.7); letter-spacing: calc(var(--u) * 0.15);
+}
+#bezel .led { position: absolute; left: calc(var(--u) * 5); top: calc(var(--u) * 21); width: calc(var(--u) * 2.2); height: calc(var(--u) * 2.2); border-radius: 50%; background: #e3242b; box-shadow: 0 0 calc(var(--u) * 1) #ff4b4b; }
+#bezel .battery { position: absolute; left: calc(var(--u) * 2.2); top: calc(var(--u) * 25); font-size: calc(var(--u) * 1.5); color: #d9d7e6; }
+#screen {
+  position: absolute; left: calc(var(--u) * 14); top: calc(var(--u) * 8);
+  width: calc(var(--u) * 48); height: calc(var(--u) * 43.2);
+  image-rendering: pixelated; image-rendering: crisp-edges; background: #ffed79;
+}
+#device .brand { position: absolute; left: calc(var(--u) * 7); top: calc(var(--u) * 69.5); color: #2b2f84; font-size: calc(var(--u) * 4.6); white-space: nowrap; }
+#device .brand b { font-weight: 800; letter-spacing: calc(var(--u) * -0.1); }
+#device .brand i { font-weight: 700; font-style: italic; margin-left: calc(var(--u) * 1.2); }
+#device .brand sup { font-size: calc(var(--u) * 1.6); }
+.dpad { position: absolute; left: calc(var(--u) * 8); top: calc(var(--u) * 84); width: calc(var(--u) * 22); height: calc(var(--u) * 22); }
+.dpad span { position: absolute; background: #2a2b30; border-radius: calc(var(--u) * 0.8); box-shadow: inset calc(var(--u) * -0.4) calc(var(--u) * -0.4) 0 #111; }
+.dpad .h { left: 0; top: calc(var(--u) * 7.5); width: calc(var(--u) * 22); height: calc(var(--u) * 7); }
+.dpad .v { left: calc(var(--u) * 7.5); top: 0; width: calc(var(--u) * 7); height: calc(var(--u) * 22); }
+.ab { position: absolute; left: calc(var(--u) * 54); top: calc(var(--u) * 84); width: calc(var(--u) * 32); height: calc(var(--u) * 20); transform: rotate(-25deg); }
+.ab .btn { position: absolute; top: calc(var(--u) * 4); width: calc(var(--u) * 10); height: calc(var(--u) * 10); border-radius: 50%; background: #9c2459; box-shadow: inset calc(var(--u) * -0.6) calc(var(--u) * -0.8) 0 #5c1234; }
+.ab .btn.b { left: 0; } .ab .btn.a { left: calc(var(--u) * 15); }
+.ab .lbl { position: absolute; top: calc(var(--u) * 15.5); font-size: calc(var(--u) * 2.6); color: #2b2f84; font-weight: 700; }
+.ab .lbl.b { left: calc(var(--u) * 3.8); } .ab .lbl.a { left: calc(var(--u) * 18.8); }
+.ss { position: absolute; left: calc(var(--u) * 27); top: calc(var(--u) * 116); width: calc(var(--u) * 30); height: calc(var(--u) * 8); transform: rotate(-25deg); }
+.ss .pill { position: absolute; top: 0; width: calc(var(--u) * 9); height: calc(var(--u) * 2.6); border-radius: calc(var(--u) * 1.3); background: #8d8a93; box-shadow: inset 0 calc(var(--u) * -0.4) 0 #5f5c65; }
+.ss .pill.sel { left: 0; } .ss .pill.st { left: calc(var(--u) * 13); }
+.ss .lbl { position: absolute; top: calc(var(--u) * 3.6); font-size: calc(var(--u) * 1.9); color: #2b2f84; font-weight: 700; letter-spacing: calc(var(--u) * 0.1); }
+.ss .lbl.sel { left: calc(var(--u) * 0.3); } .ss .lbl.st { left: calc(var(--u) * 14); }
+.speaker { position: absolute; left: calc(var(--u) * 64); top: calc(var(--u) * 120); width: calc(var(--u) * 22); height: calc(var(--u) * 20); transform: rotate(-30deg); }
+.speaker span { position: absolute; top: 0; width: calc(var(--u) * 1.4); height: calc(var(--u) * 16); border-radius: calc(var(--u) * 0.7); background: #8f8c87; box-shadow: inset calc(var(--u) * 0.3) calc(var(--u) * 0.3) 0 #5e5b57; }
+#legend {
+  flex: none; display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+  gap: 2px 14px; padding: 6px 10px; background: #17191c; font-size: 13px; line-height: 1.35;
+}
+#legend kbd { font-family: inherit; font-weight: 700; color: #ffed79; }
+#legend .item { white-space: nowrap; }
+#notice { margin: 0; color: #ff8a80; font-weight: 700; white-space: nowrap; }
+#notice[hidden] { display: none; }
+</style>
+</head>
+<body>
+<!-- ===== DOM shell ===== -->
+<main id="stage">
+  <div id="device">
+    <span class="groove"></span><span class="groove l"></span><span class="groove r"></span>
+    <span class="power">&#9664;OFF&#8226;ON&#9654;</span>
+    <div id="bezel">
+      <span class="stripe"></span><span class="stripe b"></span>
+      <span class="caption">DOT MATRIX WITH STEREO SOUND</span>
+      <span class="led"></span><span class="battery">BATTERY</span>
+      <canvas id="screen" width="160" height="144" aria-label="Tetris game screen"></canvas>
+    </div>
+    <div class="brand"><b>Nintendo</b><i>GAME BOY</i><sup>TM</sup></div>
+    <div class="dpad"><span class="h"></span><span class="v"></span></div>
+    <div class="ab"><span class="btn b"></span><span class="btn a"></span><span class="lbl b">B</span><span class="lbl a">A</span></div>
+    <div class="ss"><span class="pill sel"></span><span class="pill st"></span><span class="lbl sel">SELECT</span><span class="lbl st">START</span></div>
+    <div class="speaker"><span style="left:0"></span><span style="left:20%"></span><span style="left:40%"></span><span style="left:60%"></span><span style="left:80%"></span><span style="left:100%"></span></div>
+  </div>
+</main>
+<footer id="legend"><span id="legend-items"></span><p id="notice" hidden>Scores not saved</p></footer>
+
+<script>
+/* ==BEGIN LOGIC== */
+var GB = {};
+
+/* ===== CONST ===== */
+GB.CONST = (function () {
+  return Object.freeze({
+    // Four shades, light to dark. Sampled from reference/screenshots/*.png:
+    // exact-color pixel counts over the play, title and level screenshots.
+    // Each shade is the most frequent color in a flat region, after
+    // excluding colors within RGB distance 30 of a shade already chosen
+    // (this drops the scaling blur between shades).
+    PALETTE: Object.freeze(['#ffed79', '#b4a446', '#847947', '#4e4e4e']),
+
+    SCREEN_W: 160,
+    SCREEN_H: 144,
+
+    // Requirements 2.3: frame rate and gravity (frames per row, levels 0..20).
+    FPS: 59.73,
+    GRAVITY: Object.freeze([53, 49, 45, 41, 37, 33, 28, 22, 17, 11, 10,
+      9, 8, 7, 6, 6, 5, 5, 4, 4, 3]),
+
+    // Requirements 2.3: horizontal repeat (23 from the ROM, inGameFlow.s $2517, $2525).
+    DAS_DELAY: 23,
+    DAS_REPEAT: 9,
+    // Requirements 2.3: soft drop one row every 3 frames (inGameFlow.s $2092).
+    SOFT_DROP_INTERVAL: 3,
+
+    // Requirements 2.3: clear scores, multiplied by (level + 1).
+    LINE_SCORES: Object.freeze([40, 100, 300, 1200]),
+    MAX_START_LEVEL: 9,
+    MAX_LEVEL: 20,
+    MAX_SCORE: 999999,
+    // Lines counter is 4 BCD digits (inGameFlow.s $2194).
+    MAX_LINES: 9999,
+
+    FIELD_W: 10,
+    FIELD_H: 18,
+
+    STORAGE_PREFIX: 'gbtetris.v1.'
+  });
+})();
+
+/* ===== RULES ===== */
+// Frame-exact port of the A-Type in-game loop. Source files are in
+// vinheim3/tetris-gb-disasm: disasm/code/inGameFlow.s (IGF), bank_000.s (B0),
+// gfx.s, data/spriteData.s. One step() call equals one ROM frame:
+// GameState00_InGameMain (B0 $1bce), the main-loop timer tick (B0 $02d6),
+// then the VBlank handler (B0 $0199..$01cf).
+GB.RULES = (function () {
+  'use strict';
+  var C = GB.CONST;
+  var W = C.FIELD_W;
+  var H = C.FIELD_H;
+
+  var EMPTY = 0;
+  // Tile ids are the ROM tile bytes. Flashing row tile: constants.s TILE_FLASHING_PIECE.
+  var TILE_FLASH = 0x8c;
+
+  // Piece IDs (requirements 2.3): L0 J1 I2 O3 Z4 S5 T6.
+  // Rotation states: spriteData.s SpriteTiles_00..SpriteTiles_1b. Each state is a
+  // 4x4 grid; each cell is [gridRow, gridCol, tile].
+  var PIECES = [
+    [[[2, 0, 0x84], [2, 1, 0x84], [2, 2, 0x84], [3, 0, 0x84]],
+     [[1, 1, 0x84], [2, 1, 0x84], [3, 1, 0x84], [3, 2, 0x84]],
+     [[1, 2, 0x84], [2, 0, 0x84], [2, 1, 0x84], [2, 2, 0x84]],
+     [[1, 0, 0x84], [1, 1, 0x84], [2, 1, 0x84], [3, 1, 0x84]]],
+    [[[2, 0, 0x81], [2, 1, 0x81], [2, 2, 0x81], [3, 2, 0x81]],
+     [[1, 1, 0x81], [1, 2, 0x81], [2, 1, 0x81], [3, 1, 0x81]],
+     [[1, 0, 0x81], [2, 0, 0x81], [2, 1, 0x81], [2, 2, 0x81]],
+     [[1, 1, 0x81], [2, 1, 0x81], [3, 0, 0x81], [3, 1, 0x81]]],
+    [[[2, 0, 0x8a], [2, 1, 0x8b], [2, 2, 0x8b], [2, 3, 0x8f]],
+     [[0, 1, 0x80], [1, 1, 0x88], [2, 1, 0x88], [3, 1, 0x89]],
+     [[2, 0, 0x8a], [2, 1, 0x8b], [2, 2, 0x8b], [2, 3, 0x8f]],
+     [[0, 1, 0x80], [1, 1, 0x88], [2, 1, 0x88], [3, 1, 0x89]]],
+    [[[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]],
+     [[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]],
+     [[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]],
+     [[2, 1, 0x83], [2, 2, 0x83], [3, 1, 0x83], [3, 2, 0x83]]],
+    [[[2, 0, 0x82], [2, 1, 0x82], [3, 1, 0x82], [3, 2, 0x82]],
+     [[1, 1, 0x82], [2, 0, 0x82], [2, 1, 0x82], [3, 0, 0x82]],
+     [[2, 0, 0x82], [2, 1, 0x82], [3, 1, 0x82], [3, 2, 0x82]],
+     [[1, 1, 0x82], [2, 0, 0x82], [2, 1, 0x82], [3, 0, 0x82]]],
+    [[[2, 1, 0x86], [2, 2, 0x86], [3, 0, 0x86], [3, 1, 0x86]],
+     [[1, 0, 0x86], [2, 0, 0x86], [2, 1, 0x86], [3, 1, 0x86]],
+     [[2, 1, 0x86], [2, 2, 0x86], [3, 0, 0x86], [3, 1, 0x86]],
+     [[1, 0, 0x86], [2, 0, 0x86], [2, 1, 0x86], [3, 1, 0x86]]],
+    [[[2, 0, 0x85], [2, 1, 0x85], [2, 2, 0x85], [3, 1, 0x85]],
+     [[1, 1, 0x85], [2, 1, 0x85], [2, 2, 0x85], [3, 1, 0x85]],
+     [[1, 1, 0x85], [2, 0, 0x85], [2, 1, 0x85], [2, 2, 0x85]],
+     [[1, 1, 0x85], [2, 0, 0x85], [2, 1, 0x85], [3, 1, 0x85]]]
+  ];
+
+  // Spawn: sprite base Y $18, X $3f (IGF $200d, $2010) plus spec offsets $ef/$f0
+  // (spriteData.s SpriteSpec_00) map grid cell (r, c) to field row r-1, column c+3
+  // (gfx.s GetScreen0AddressOfPieceSquare). SPAWN_ROW/COL is the grid origin.
+  var SPAWN_ROW = -1;
+  var SPAWN_COL = 3;
+
+  // hPieceFallingState and hRowsShiftingDownState values (constants.s).
+  var FALL_NONE = 0, FALL_HIT = 1, FALL_CHECK = 2, FALL_PROCESSED = 3;
+  var SHIFT_NONE = 0, SHIFT_RAM = 1, SHIFT_ROW_START = 2;
+
+  // Row-clear timing (IGF FlashCompletedTetrisRows): 7 phases 10 frames apart,
+  // then 13 frames before the RAM shift. Lock-to-check timer is 2 (IGF $2178).
+  var FLASH_PHASES = 7, FLASH_INTERVAL = 10, SHIFT_WAIT = 13, CHECK_WAIT = 2;
+  // Rows 0 and 1 are never checked for completion (IGF $214e: start at row 2).
+  var FIRST_CHECKED_ROW = 2;
+  // The score is added while the VRAM copy state equals 5 (B0 $1f9c), the level
+  // is checked when row 3 is copied (IGF $239a).
+  var SCORE_SHIFT_STATE = 5;
+  var LEVEL_CHECK_ROW = 3;
+  // A-Type stops level checks at 1000 lines (IGF $2463).
+  var LEVEL_LINES_LIMIT = 1000;
+
+  // The board holds field rows -1..17. Row -1 is the hidden tile-map row 31
+  // above the field (cleared by B0 FillBottom2RowsOfTileMapWithEmptyTile).
+  // A piece can reach it only with the vertical I at the top.
+  function idx(row, col) { return (row + 1) * W + col; }
+
+  function cells(type, rot) { return PIECES[type][rot]; }
+
+  function collides(board, type, rot, row, col) {
+    var cs = PIECES[type][rot];
+    for (var i = 0; i < 4; i++) {
+      var r = row + cs[i][0], c = col + cs[i][1];
+      if (c < 0 || c >= W || r >= H) return true;
+      if (r < -1) continue;
+      if (board[idx(r, c)] !== EMPTY) return true;
+    }
+    return false;
+  }
+
+  function addScore(g, value) {
+    g.score = Math.min(g.score + value, C.MAX_SCORE);
+  }
+
+  function gravityReload(level) { return C.GRAVITY[level] - 1; }
+
+  // IGF PlayNextPieceLoadNextAndHiddenPiece ($2007). The hidden piece gets up to
+  // 3 rolls; rolls 1 and 2 reroll when (candidate | preview | current) & $fc
+  // equals current, with piece ids times 4 as in the ROM spec index.
+  function loadNext(g) {
+    g.type = g.preview;
+    g.rot = 0;
+    g.row = SPAWN_ROW;
+    g.col = SPAWN_COL;
+    g.active = true;
+    var current = g.type * 4;
+    var preview = g.hidden;
+    var candidate;
+    for (var roll = 1; ; roll++) {
+      candidate = Math.floor(g.rng() * 7);
+      if (roll === 3) break;
+      if ((((candidate * 4) | (preview * 4) | current) & 0xfc) !== current) break;
+    }
+    g.preview = preview;
+    g.hidden = candidate;
+    g.gravCounter = g.gravReload;
+  }
+
+  function createGame(opts) {
+    var startLevel = opts.startLevel | 0;
+    if (startLevel < 0 || startLevel > C.MAX_START_LEVEL) throw new RangeError('startLevel');
+    if (typeof opts.rng !== 'function') throw new TypeError('rng');
+    var g = {
+      rng: opts.rng,
+      level: startLevel,
+      lines: 0,
+      score: 0,
+      shownScore: 0,
+      shownLines: 0,
+      board: new Array((H + 1) * W).fill(EMPTY),
+      vram: new Array(H * W).fill(EMPTY),
+      type: 0, rot: 0, row: SPAWN_ROW, col: SPAWN_COL, active: false,
+      // The ROM starts both specs as L (gfx.s SpriteSpecStruct_LPiece*). The hidden
+      // piece starts as L too (unverified assumption: cleared HRAM).
+      preview: 0,
+      hidden: 0,
+      fall: FALL_NONE,
+      shift: SHIFT_NONE,
+      timer1: 0,
+      timer2: 0,
+      // hStickyButtonCounter start value is not set by the in-game init. Start at
+      // the full delay (unverified assumption; matters only if a side key is
+      // already held at the first frame).
+      sticky: C.DAS_DELAY,
+      gravReload: gravityReload(startLevel),
+      gravCounter: gravityReload(startLevel),
+      holdCount: 0,
+      canPressDown: 0,
+      stuck: 0,
+      flashCount: 0,
+      clearRows: [],
+      pendingClear: 0,
+      held: { left: false, right: false, down: false },
+      over: false,
+      frame: 0
+    };
+    // B0 $1aa6..$1aac: three loads fill current, preview and hidden.
+    loadNext(g); loadNext(g); loadNext(g);
+    return g;
+  }
+
+  function tryShift(g, dx) {
+    g.col += dx;
+    if (collides(g.board, g.type, g.rot, g.row, g.col)) {
+      g.col -= dx;
+      // IGF $2547: a blocked move retries every frame.
+      g.sticky = 1;
+    }
+  }
+
+  // IGF InGameCheckButtonsPressed ($24bb). Rotate is the A button (spec index
+  // minus 1), which is clockwise. Right has priority over left.
+  function checkButtons(g, pressed, held, rotate) {
+    if (!g.active) return;
+    if (rotate) {
+      var pre = g.rot;
+      g.rot = (g.rot + 3) & 3;
+      if (collides(g.board, g.type, g.rot, g.row, g.col)) g.rot = pre;
+    }
+    if (pressed.right) { g.sticky = C.DAS_DELAY; tryShift(g, 1); return; }
+    if (held.right) {
+      g.sticky = (g.sticky - 1) & 0xff;
+      if (g.sticky !== 0) return;
+      g.sticky = C.DAS_REPEAT; tryShift(g, 1); return;
+    }
+    if (pressed.left) { g.sticky = C.DAS_DELAY; tryShift(g, -1); return; }
+    if (held.left) {
+      g.sticky = (g.sticky - 1) & 0xff;
+      if (g.sticky !== 0) return;
+      g.sticky = C.DAS_REPEAT; tryShift(g, -1); return;
+    }
+    g.sticky = C.DAS_DELAY;
+  }
+
+  // IGF $20c2..$2125: move down one row, lock on collision.
+  function moveDown(g, events) {
+    // A hidden piece has its sprites off screen, so the ROM move has no effect.
+    if (!g.active) return;
+    g.row++;
+    if (!collides(g.board, g.type, g.rot, g.row, g.col)) return;
+    g.row--;
+    g.fall = FALL_HIT;
+    g.canPressDown = 1;
+    if (g.holdCount !== 0) {
+      // IGF $2126: A-Type adds (held steps - 1) points, not multiplied by level.
+      addScore(g, g.holdCount - 1);
+      g.shownScore = g.score;
+      g.holdCount = 0;
+    }
+    if (g.row === SPAWN_ROW && g.col === SPAWN_COL) {
+      // IGF $210f: the first lock at the spawn position is skipped once.
+      if (g.stuck === 1) {
+        g.over = true;
+        events.push({ type: 'gameOver' });
+      } else {
+        g.stuck++;
+      }
+    }
+  }
+
+  // IGF InGameHandlePieceFalling ($2071, entry .start $209c).
+  function handleFalling(g, pressed, held, events) {
+    var downOnly = held.down && !held.left && !held.right;
+    if (downOnly && !(g.canPressDown !== 0 && !pressed.down)) {
+      g.canPressDown = 0;
+      if (g.timer2 !== 0 || g.fall !== FALL_NONE || g.shift !== SHIFT_NONE) return;
+      g.timer2 = C.SOFT_DROP_INTERVAL;
+      g.holdCount = (g.holdCount + 1) & 0xff;
+      moveDown(g, events);
+      return;
+    }
+    g.holdCount = 0;
+    if (g.gravCounter !== 0) { g.gravCounter--; return; }
+    if (g.fall === FALL_PROCESSED || g.shift !== SHIFT_NONE) return;
+    g.gravCounter = g.gravReload;
+    moveDown(g, events);
+  }
+
+  // IGF InGameCheckIfAnyTetrisRowsComplete ($213e).
+  function checkRows(g, events) {
+    if (g.fall !== FALL_CHECK) return;
+    g.clearRows = [];
+    for (var r = FIRST_CHECKED_ROW; r < H; r++) {
+      var full = true;
+      for (var c = 0; c < W; c++) if (g.board[idx(r, c)] === EMPTY) { full = false; break; }
+      if (full) g.clearRows.push(r);
+    }
+    g.fall = FALL_PROCESSED;
+    g.timer1 = CHECK_WAIT;
+    var n = g.clearRows.length;
+    if (n === 0) return;
+    g.lines = Math.min(g.lines + n, C.MAX_LINES);
+    g.pendingClear = n;
+    events.push({ type: 'clear', count: n, rows: g.clearRows.slice() });
+  }
+
+  // IGF InGameAddPieceToVram ($25a1).
+  function addPiece(g, events) {
+    if (g.fall !== FALL_HIT) return;
+    var cs = PIECES[g.type][g.rot];
+    for (var i = 0; i < 4; i++) {
+      var r = g.row + cs[i][0], c = g.col + cs[i][1];
+      g.board[idx(r, c)] = cs[i][2];
+      if (r >= 0) g.vram[r * W + c] = cs[i][2];
+    }
+    g.fall = FALL_CHECK;
+    g.active = false;
+    events.push({ type: 'lock', piece: g.type });
+  }
+
+  // IGF ShiftEntireGameRamBufferDownARow ($224d). Rows are processed top to
+  // bottom; each shift copies rows 0..r-1 down by one, then row 0 is cleared once.
+  function shiftRam(g) {
+    if (g.timer1 !== 0 || g.shift !== SHIFT_RAM) return;
+    for (var k = 0; k < g.clearRows.length; k++) {
+      for (var r = g.clearRows[k]; r >= 1; r--) {
+        for (var c = 0; c < W; c++) g.board[idx(r, c)] = g.board[idx(r - 1, c)];
+      }
+    }
+    for (var c2 = 0; c2 < W; c2++) g.board[idx(0, c2)] = EMPTY;
+    g.clearRows = [];
+    g.shift = SHIFT_ROW_START;
+  }
+
+  // B0 AddOnCompletedLinesScore ($1f91): score at the pre-clear level.
+  function addLineScore(g) {
+    if (g.shift !== SCORE_SHIFT_STATE || g.pendingClear === 0) return;
+    var base = C.LINE_SCORES[g.pendingClear - 1];
+    g.pendingClear = 0;
+    addScore(g, base * (g.level + 1));
+  }
+
+  // IGF CheckIfATypeNextLevelReached ($244b).
+  function checkLevel(g, events) {
+    if (g.level === C.MAX_LEVEL) return;
+    if (g.lines >= LEVEL_LINES_LIMIT) return;
+    if (Math.floor(g.lines / 10) <= g.level) return;
+    g.level++;
+    g.gravReload = gravityReload(g.level);
+    g.gravCounter = g.gravReload;
+    events.push({ type: 'levelUp', level: g.level });
+  }
+
+  // IGF FlashCompletedTetrisRows ($21e0), run in VBlank.
+  function flashRows(g, events) {
+    if (g.fall !== FALL_PROCESSED || g.timer1 !== 0) return;
+    var rows = g.clearRows, k, c;
+    if ((g.flashCount & 1) === 0) {
+      if (rows.length === 0) {
+        loadNext(g);
+        g.fall = FALL_NONE;
+        events.push({ type: 'spawn', piece: g.type });
+        return;
+      }
+      var tile = g.flashCount === FLASH_PHASES - 1 ? EMPTY : TILE_FLASH;
+      for (k = 0; k < rows.length; k++) for (c = 0; c < W; c++) g.vram[rows[k] * W + c] = tile;
+    } else {
+      for (k = 0; k < rows.length; k++) for (c = 0; c < W; c++) g.vram[rows[k] * W + c] = g.board[idx(rows[k], c)];
+    }
+    g.flashCount++;
+    if (g.flashCount === FLASH_PHASES) {
+      g.flashCount = 0;
+      g.timer1 = SHIFT_WAIT;
+      g.shift = SHIFT_RAM;
+      g.fall = FALL_NONE;
+    } else {
+      g.timer1 = FLASH_INTERVAL;
+    }
+  }
+
+  // IGF CopyRamBufferRow17ToVram..Row0ToVram, one row per VBlank, bottom first.
+  function copyRows(g, events) {
+    if (g.shift < SHIFT_ROW_START) return;
+    var r = H - 1 - (g.shift - SHIFT_ROW_START);
+    for (var c = 0; c < W; c++) g.vram[r * W + c] = g.board[idx(r, c)];
+    g.shift++;
+    if (r === LEVEL_CHECK_ROW) checkLevel(g, events);
+    if (r === 2) g.shownScore = g.score;
+    if (r === 0) {
+      g.canPressDown = 1;
+      g.shift = SHIFT_NONE;
+      g.shownLines = g.lines;
+      loadNext(g);
+      events.push({ type: 'spawn', piece: g.type });
+    }
+  }
+
+  // input: { left, right, down } held this frame, rotate true on the press frame.
+  function step(g, input) {
+    var events = [];
+    if (g.over) return events;
+    var held = { left: !!input.left, right: !!input.right, down: !!input.down };
+    var pressed = {
+      left: held.left && !g.held.left,
+      right: held.right && !g.held.right,
+      down: held.down && !g.held.down
+    };
+    g.held = held;
+    checkButtons(g, pressed, held, !!input.rotate);
+    handleFalling(g, pressed, held, events);
+    checkRows(g, events);
+    addPiece(g, events);
+    shiftRam(g);
+    addLineScore(g);
+    if (g.timer1 > 0) g.timer1--;
+    if (g.timer2 > 0) g.timer2--;
+    g.frame++;
+    if (g.over) return events;
+    flashRows(g, events);
+    copyRows(g, events);
+    return events;
+  }
+
+  // Cells of the falling piece in field coordinates, or [] when hidden.
+  function activeCells(g) {
+    if (!g.active) return [];
+    return PIECES[g.type][g.rot].map(function (c) {
+      return { row: g.row + c[0], col: g.col + c[1], tile: c[2] };
+    });
+  }
+
+  return {
+    PIECES: PIECES,
+    SPAWN_ROW: SPAWN_ROW,
+    SPAWN_COL: SPAWN_COL,
+    EMPTY: EMPTY,
+    TILE_FLASH: TILE_FLASH,
+    idx: idx,
+    cells: cells,
+    collides: collides,
+    createGame: createGame,
+    step: step,
+    activeCells: activeCells,
+    loadNext: loadNext
+  };
+})();
+
+/* ===== DATA ===== */
+// All art is redrawn by hand as text. Shade keys: '.' lightest, '+' light-mid,
+// 'o' dark-mid, '#' darkest. Tile positions follow the ROM layouts
+// (disasm/data/layout_*.bin); the pixels are not copied from the ROM.
+GB.DATA = (function () {
+  'use strict';
+  var SHADE = { '.': 0, '+': 1, 'o': 2, '#': 3 };
+
+  function compile(rows) {
+    if (rows.length !== 8) throw new Error('tile needs 8 rows');
+    var t = new Uint8Array(64);
+    for (var y = 0; y < 8; y++) {
+      if (rows[y].length !== 8) throw new Error('tile row needs 8 pixels: ' + rows[y]);
+      for (var x = 0; x < 8; x++) {
+        var v = SHADE[rows[y][x]];
+        if (v === undefined) throw new Error('bad shade ' + rows[y][x]);
+        t[y * 8 + x] = v;
+      }
+    }
+    return t;
+  }
+
+  function solid(ch) { var r = []; for (var i = 0; i < 8; i++) r.push(ch + ch + ch + ch + ch + ch + ch + ch); return r; }
+
+  // ---- Block tiles, keyed by the ROM tile id the engine stores. ----
+  var BLOCKS = {
+    0x84: ['########', '#oooooo#', '#oooooo#', '#oooooo#', '#oooooo#', '#oooooo#', '#oooooo#', '########'], // L
+    0x81: ['########', '#++++++#', '#+####+#', '#+#..#+#', '#+#..#+#', '#+####+#', '#++++++#', '########'], // J
+    0x83: ['########', '#......#', '#.####.#', '#.####.#', '#.####.#', '#.####.#', '#......#', '########'], // O
+    0x82: ['########', '#++++++#', '#++++++#', '#++##++#', '#++##++#', '#++++++#', '#++++++#', '########'], // Z
+    0x86: ['########', '#oooooo#', '#o####o#', '#o#..#o#', '#o#..#o#', '#o####o#', '#oooooo#', '########'], // S
+    0x85: ['########', '#++++++#', '#+....+#', '#+.++#+#', '#+.++#+#', '#+####+#', '#++++++#', '########'], // T
+    // I piece: dotted bar with end caps. Horizontal left, middle, right.
+    0x8a: ['########', '#+o+++o+', '#+++o+++', '#o+++++o', '#++o++++', '#+++++o+', '#+o+o+++', '########'],
+    0x8b: ['########', '+++o+++o', '+o+++o++', '+++++++o', 'o++o++++', '++++o+o+', '+o++++++', '########'],
+    0x8f: ['########', '++o+++o#', 'o+++o++#', '+++++++#', '+o+o+++#', '++++++o#', 'o++o+++#', '########'],
+    // Vertical top, middle, bottom.
+    0x80: ['########', '#++o+o+#', '#o+++++#', '#+++o++#', '#+o+++o#', '#++++++#', '#o++o++#', '#++++++#'],
+    0x88: ['#+o+++o#', '#+++o++#', '#o+++++#', '#++o++o#', '#++++++#', '#+o++o+#', '#++++++#', '#o+++o+#'],
+    0x89: ['#++o+++#', '#o++++o#', '#+++o++#', '#+o++++#', '#+++++o#', '#o+o+++#', '#++++++#', '########'],
+    // Row-clear flash tile.
+    0x8c: solid('+')
+  };
+
+  // ---- Background tiles. ----
+  var TILES = {
+    empty: solid('.'),
+    dark: solid('#'),
+    // Brick wall: 3 tiles stacked repeat every 24 rows (layout_aTypeInGame.bin
+    // uses 3 wall tiles). Courses are 3 pixels high and offset by 2.
+    wall0: ['########', '.++#.++#', '+++#+++#', '########', '+#.++#.+', '++#+++#+', '########', '.++#.++#'],
+    wall1: ['+++#+++#', '########', '+#.++#.+', '++#+++#+', '########', '.++#.++#', '+++#+++#', '########'],
+    wall2: ['+#.++#.+', '++#+++#+', '########', '.++#.++#', '+++#+++#', '########', '+#.++#.+', '++#+++#+'],
+    // Panel box on the dark side panel.
+    boxTL: ['########', '##......', '#.oooooo', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....'],
+    boxT: ['########', '........', 'oooooooo', '........', '........', '........', '........', '........'],
+    boxTR: ['########', '......##', 'oooooo.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#'],
+    boxL: ['#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....'],
+    boxR: ['.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#'],
+    boxBL: ['#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.o.....', '#.oooooo', '##......', '########'],
+    boxB: ['........', '........', '........', '........', '........', 'oooooooo', '........', '########'],
+    boxBR: ['.....o.#', '.....o.#', '.....o.#', '.....o.#', '.....o.#', 'oooooo.#', '......##', '########'],
+    // Two boxes stacked with a dark gap (LEVEL over LINES).
+    boxJoinL: ['#.o.....', '#.oooooo', '##......', '########', '########', '##......', '#.oooooo', '#.o.....'],
+    boxJoin: ['........', 'oooooooo', '........', '########', '########', '........', 'oooooooo', '........'],
+    boxJoinR: ['.....o.#', 'oooooo.#', '......##', '########', '########', '......##', 'oooooo.#', '.....o.#'],
+    // SCORE box bottom over the dark-mid band under it.
+    bandL: ['#.oooooo', '##......', '########', 'oooooooo', 'oooooooo', 'oooooooo', '########', '........'],
+    band: ['oooooooo', '........', '########', 'oooooooo', 'oooooooo', 'oooooooo', '########', '........'],
+    bandR: ['oooooo.#', '......##', '########', 'oooooooo', 'oooooooo', 'oooooooo', '########', '........'],
+    // Line under the score row, back to the dark panel.
+    scoreBase: ['........', 'oooooooo', '########', '########', '########', '########', '########', '########'],
+    // Menu background: light-mid with dark dots (A-TYPE screen).
+    dots: ['+#++++++', '+++++#++', '++++++++', '+++#++++', '#+++++++', '++++++#+', '++#+++++', '++++++++']
+  };
+
+  // ---- Font: 1-bit glyphs, '#' ink. 7x7 in an 8x8 cell. ----
+  var FONT_SRC = {
+    'A': ['..###..', '.##.##.', '##...##', '##...##', '#######', '##...##', '##...##'],
+    'B': ['######.', '##...##', '##...##', '######.', '##...##', '##...##', '######.'],
+    'C': ['.#####.', '##...##', '##.....', '##.....', '##.....', '##...##', '.#####.'],
+    'D': ['#####..', '##..##.', '##...##', '##...##', '##...##', '##..##.', '#####..'],
+    'E': ['#######', '##.....', '##.....', '######.', '##.....', '##.....', '#######'],
+    'F': ['#######', '##.....', '##.....', '######.', '##.....', '##.....', '##.....'],
+    'G': ['.#####.', '##...##', '##.....', '##.####', '##...##', '##...##', '.#####.'],
+    'H': ['##...##', '##...##', '##...##', '#######', '##...##', '##...##', '##...##'],
+    'I': ['######.', '..##...', '..##...', '..##...', '..##...', '..##...', '######.'],
+    'J': ['..#####', '....##.', '....##.', '....##.', '##..##.', '##..##.', '.####..'],
+    'K': ['##...##', '##..##.', '##.##..', '####...', '##.##..', '##..##.', '##...##'],
+    'L': ['##.....', '##.....', '##.....', '##.....', '##.....', '##.....', '#######'],
+    'M': ['##...##', '###.###', '#######', '##.#.##', '##...##', '##...##', '##...##'],
+    'N': ['##...##', '###..##', '####.##', '##.####', '##..###', '##...##', '##...##'],
+    'O': ['.#####.', '##...##', '##...##', '##...##', '##...##', '##...##', '.#####.'],
+    'P': ['######.', '##...##', '##...##', '######.', '##.....', '##.....', '##.....'],
+    'Q': ['.#####.', '##...##', '##...##', '##...##', '##.#.##', '##..##.', '.###.##'],
+    'R': ['######.', '##...##', '##...##', '######.', '##.##..', '##..##.', '##...##'],
+    'S': ['.#####.', '##...##', '##.....', '.#####.', '.....##', '##...##', '.#####.'],
+    'T': ['######.', '..##...', '..##...', '..##...', '..##...', '..##...', '..##...'],
+    'U': ['##...##', '##...##', '##...##', '##...##', '##...##', '##...##', '.#####.'],
+    'V': ['##...##', '##...##', '##...##', '##...##', '.##.##.', '..###..', '...#...'],
+    'W': ['##...##', '##...##', '##...##', '##.#.##', '#######', '###.###', '##...##'],
+    'X': ['##...##', '.##.##.', '..###..', '..###..', '..###..', '.##.##.', '##...##'],
+    'Y': ['##..##.', '##..##.', '##..##.', '.####..', '..##...', '..##...', '..##...'],
+    'Z': ['#######', '....##.', '...##..', '..##...', '.##....', '##.....', '#######'],
+    '0': ['..###..', '.##.##.', '##...##', '##...##', '##...##', '.##.##.', '..###..'],
+    '1': ['..##...', '.###...', '..##...', '..##...', '..##...', '..##...', '.####..'],
+    '2': ['.#####.', '##...##', '.....##', '..####.', '.##....', '##.....', '#######'],
+    '3': ['.#####.', '##...##', '.....##', '..####.', '.....##', '##...##', '.#####.'],
+    '4': ['...###.', '..####.', '.##.##.', '##..##.', '#######', '....##.', '....##.'],
+    '5': ['######.', '##.....', '######.', '.....##', '.....##', '##...##', '.#####.'],
+    '6': ['.#####.', '##.....', '##.....', '######.', '##...##', '##...##', '.#####.'],
+    '7': ['#######', '##...##', '....##.', '...##..', '..##...', '..##...', '..##...'],
+    '8': ['.#####.', '##...##', '##...##', '.#####.', '##...##', '##...##', '.#####.'],
+    '9': ['.#####.', '##...##', '##...##', '.######', '.....##', '##...##', '.#####.'],
+    '.': ['.......', '.......', '.......', '.......', '.......', '..##...', '..##...'],
+    '-': ['.......', '.......', '.......', '.#####.', '.......', '.......', '.......'],
+    ':': ['.......', '..##...', '..##...', '.......', '..##...', '..##...', '.......'],
+    '!': ['..##...', '..##...', '..##...', '..##...', '.......', '..##...', '..##...'],
+    '*': ['.......', '##...##', '.##.##.', '..###..', '.##.##.', '##...##', '.......'], // multiply sign
+    '©': ['.#####.', '#.....#', '#.###.#', '#.#...#', '#.###.#', '#.....#', '.#####.'],
+    '▶': ['##.....', '####...', '######.', '#######', '######.', '####...', '##.....'], // cursor
+    '↑': ['...#...', '..###..', '.#####.', '#######', '..###..', '..###..', '..###..'],
+    '↓': ['..###..', '..###..', '..###..', '#######', '.#####.', '..###..', '...#...'],
+    '←': ['...#...', '..##...', '.######', '#######', '.######', '..##...', '...#...'],
+    '→': ['...#...', '...##..', '######.', '#######', '######.', '...##..', '...#...'],
+    '_': ['.......', '.......', '.......', '.......', '.......', '#.#.#.#', '.......'], // dotted blank
+    // Lowercase for the title notice only.
+    'd': ['.....##', '.....##', '.######', '##...##', '##...##', '##...##', '.######'],
+    'e': ['.......', '.......', '.#####.', '##...##', '#######', '##.....', '.#####.'],
+    'i': ['..##...', '.......', '.###...', '..##...', '..##...', '..##...', '.####..'],
+    'n': ['.......', '.......', '######.', '##...##', '##...##', '##...##', '##...##'],
+    'o': ['.......', '.......', '.#####.', '##...##', '##...##', '##...##', '.#####.'],
+    't': ['.##....', '.##....', '#####..', '.##....', '.##....', '.##..##', '..####.'],
+    ' ': ['.......', '.......', '.......', '.......', '.......', '.......', '.......']
+  };
+
+  var FONT = {};
+  Object.keys(FONT_SRC).forEach(function (ch) {
+    var src = FONT_SRC[ch];
+    var g = new Uint8Array(64);
+    for (var y = 0; y < 7; y++) for (var x = 0; x < 7; x++) g[y * 8 + x] = src[y][x] === '#' ? 1 : 0;
+    FONT[ch] = g;
+  });
+
+  var compiledTiles = {};
+  Object.keys(TILES).forEach(function (k) { compiledTiles[k] = compile(TILES[k]); });
+  var compiledBlocks = {};
+  Object.keys(BLOCKS).forEach(function (k) { compiledBlocks[k] = compile(BLOCKS[k]); });
+
+  // ---- Layouts: 18 rows of 20 keys. Structure from layout_aTypeInGame.bin. ----
+  var LEGEND_PLAY = {
+    '#': 'dark', ' ': 'empty', 'a': 'wall0', 'b': 'wall1', 'c': 'wall2',
+    '[': 'boxTL', '-': 'boxT', ']': 'boxTR', '(': 'boxL', ')': 'boxR',
+    '{': 'boxBL', '_': 'boxB', '}': 'boxBR', '<': 'boxJoinL', '=': 'boxJoin', '>': 'boxJoinR',
+    'L': 'bandL', 'B': 'band', 'R': 'bandR', 'u': 'scoreBase'
+  };
+  var LAYOUT_PLAY = [
+    '#a          a[-----]',
+    '#b          b(     )',
+    '#c          cLBBBBBR',
+    '#a          a       ',
+    '#b          buuuuuuu',
+    '#c          c[-----]',
+    '#a          a(     )',
+    '#b          b(     )',
+    '#c          c<=====>',
+    '#a          a(     )',
+    '#b          b(     )',
+    '#c          c{_____}',
+    '#a          a#[----]',
+    '#b          b#(    )',
+    '#c          c#(    )',
+    '#a          a#(    )',
+    '#b          b#(    )',
+    '#c          c#{____}'
+  ];
+  // Text drawn over the play layout: [text, col, row].
+  var TEXT_PLAY = [['SCORE', 14, 1], ['LEVEL', 14, 6], ['LINES', 14, 9]];
+
+  // Level-select cell positions: ATypeLevelsCoords (menuScreens.s $1614) put
+  // levels 0..4 on tile row 6 and 5..9 on row 8, at tile columns 5..13 step 2.
+  var LEVEL_CELLS = [];
+  for (var lv = 0; lv < 10; lv++) LEVEL_CELLS.push([5 + 2 * (lv % 5), lv < 5 ? 6 : 8]);
+
+  // ---- Music. Provenance: original transcription of the public-domain
+  // Russian folk song "Korobeiniki" (melody by ear, A minor), with an
+  // original bass line (quarter-note roots and fifths). Not taken from the
+  // ROM song data (songData.s) or from any game arrangement.
+  // Notes are [MIDI pitch, beats]; pitch 0 is a rest. Form: A A B.
+  var MELODY_A = [
+    [76, 1], [71, 0.5], [72, 0.5], [74, 1], [72, 0.5], [71, 0.5],
+    [69, 1], [69, 0.5], [72, 0.5], [76, 1], [74, 0.5], [72, 0.5],
+    [71, 1.5], [72, 0.5], [74, 1], [76, 1],
+    [72, 1], [69, 1], [69, 2],
+    [74, 1.5], [77, 0.5], [81, 1], [79, 0.5], [77, 0.5],
+    [76, 1.5], [72, 0.5], [76, 1], [74, 0.5], [72, 0.5],
+    [71, 1], [71, 0.5], [72, 0.5], [74, 1], [76, 1],
+    [72, 1], [69, 1], [69, 2]
+  ];
+  var MELODY_B = [
+    [76, 2], [72, 2], [74, 2], [71, 2], [72, 2], [69, 2], [68, 2], [71, 2],
+    [76, 2], [72, 2], [74, 2], [71, 2], [72, 1], [76, 1], [81, 2], [80, 4]
+  ];
+  // Chords per bar: E Am E Am Dm Am E Am, then B: Am E Am E Am E Am E.
+  function bassBar(root) { return [[root, 1], [root + 7, 1], [root + 12, 1], [root + 7, 1]]; }
+  var E2 = 40, A2 = 45, D3 = 50;
+  var BASS_A = [E2, A2, E2, A2, D3, A2, E2, A2].reduce(function (acc, r) { return acc.concat(bassBar(r)); }, []);
+  var BASS_B = [A2, E2, A2, E2, A2, E2, A2, E2].reduce(function (acc, r) { return acc.concat(bassBar(r)); }, []);
+  var SONG = {
+    bpm: 144,
+    voices: [
+      { name: 'melody', duty: 0.25, gain: 0.16, notes: MELODY_A.concat(MELODY_A, MELODY_B) },
+      { name: 'bass', duty: 0.5, gain: 0.12, notes: BASS_A.concat(BASS_A, BASS_B) }
+    ]
+  };
+
+  return {
+    SHADE: SHADE,
+    compile: compile,
+    SONG: SONG,
+    LEVEL_CELLS: LEVEL_CELLS,
+    TILES: compiledTiles,
+    BLOCKS: compiledBlocks,
+    FONT: FONT,
+    LEGEND_PLAY: LEGEND_PLAY,
+    LAYOUT_PLAY: LAYOUT_PLAY,
+    TEXT_PLAY: TEXT_PLAY,
+    // Number positions (right-most digit column, row) from the ROM: score
+    // at row 3 col 18 (layout '0' tile), level ends at col 17 ($98f1), lines
+    // end at col 17 ($994e + 3 digits).
+    POS_SCORE: [18, 3],
+    POS_LEVEL: [17, 7],
+    POS_LINES: [17, 10],
+    // Next-piece origin: sprite base $80/$8f (gfx.s SpriteSpecStruct_LPieceNext)
+    // puts grid cell (r, c) at pixel (120 + 8c, 96 + 8r).
+    NEXT_X: 120,
+    NEXT_Y: 96,
+    // Field origin: tile column 2, row 0.
+    FIELD_X: 16,
+    FIELD_Y: 0
+  };
+})();
+
+/* ===== VIEW ===== */
+// Pure renderer: a 160x144 framebuffer of shade indexes 0..3.
+GB.VIEW = (function () {
+  'use strict';
+  var C = GB.CONST, D = GB.DATA, R = GB.RULES;
+  var W = C.SCREEN_W, H = C.SCREEN_H;
+
+  function createFramebuffer() { return new Uint8Array(W * H); }
+
+  function fill(fb, shade) { fb.fill(shade); }
+
+  // Draws an 8x8 tile at pixel (x, y). Pixels outside the screen are skipped.
+  function blit(fb, tile, x, y) {
+    for (var ty = 0; ty < 8; ty++) {
+      var py = y + ty;
+      if (py < 0 || py >= H) continue;
+      for (var tx = 0; tx < 8; tx++) {
+        var px = x + tx;
+        if (px < 0 || px >= W) continue;
+        fb[py * W + px] = tile[ty * 8 + tx];
+      }
+    }
+  }
+
+  function fillRect(fb, x, y, w, h, shade) {
+    for (var py = Math.max(0, y); py < Math.min(H, y + h); py++) {
+      for (var px = Math.max(0, x); px < Math.min(W, x + w); px++) fb[py * W + px] = shade;
+    }
+  }
+
+  // Draws text on the tile grid. Unknown characters draw as blanks.
+  function drawText(fb, text, col, row, fg, bg) {
+    fg = fg === undefined ? 3 : fg;
+    bg = bg === undefined ? 0 : bg;
+    var str = String(text);
+    for (var i = 0; i < str.length; i++) {
+      var g = D.FONT[str[i]] || D.FONT[' '];
+      var x0 = (col + i) * 8, y0 = row * 8;
+      for (var y = 0; y < 8; y++) {
+        var py = y0 + y;
+        if (py < 0 || py >= H) continue;
+        for (var x = 0; x < 8; x++) {
+          var px = x0 + x;
+          if (px < 0 || px >= W) continue;
+          if (bg < 0 && !g[y * 8 + x]) continue;
+          fb[py * W + px] = g[y * 8 + x] ? fg : bg;
+        }
+      }
+    }
+  }
+
+  // Right-aligned number with no leading zeros; last digit at rightCol.
+  function drawNumberRight(fb, n, rightCol, row, fg, bg) {
+    var s = String(Math.max(0, Math.floor(n)));
+    drawText(fb, s, rightCol - s.length + 1, row, fg, bg);
+  }
+
+  function drawLayout(fb, layout, legend) {
+    for (var r = 0; r < layout.length; r++) {
+      for (var c = 0; c < layout[r].length; c++) {
+        var name = legend[layout[r][c]];
+        if (!name) throw new Error('layout key ' + layout[r][c]);
+        blit(fb, D.TILES[name], c * 8, r * 8);
+      }
+    }
+  }
+
+  function drawField(fb, vram) {
+    for (var r = 0; r < C.FIELD_H; r++) {
+      for (var c = 0; c < C.FIELD_W; c++) {
+        var v = vram[r * C.FIELD_W + c];
+        blit(fb, v ? D.BLOCKS[v] : D.TILES.empty, D.FIELD_X + c * 8, D.FIELD_Y + r * 8);
+      }
+    }
+  }
+
+  function drawPiece(fb, cells, x0, y0) {
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      if (cell.row < 0) continue; // above the field: no sprite shown
+      blit(fb, D.BLOCKS[cell.tile], x0 + cell.col * 8, y0 + cell.row * 8);
+    }
+  }
+
+  // Play screen. opts.label: text centered on the field (for example PAUSE).
+  function renderPlay(fb, game, opts) {
+    opts = opts || {};
+    drawLayout(fb, D.LAYOUT_PLAY, D.LEGEND_PLAY);
+    D.TEXT_PLAY.forEach(function (t) { drawText(fb, t[0], t[1], t[2]); });
+    drawField(fb, game.vram);
+    if (!opts.hidePieces) {
+      drawPiece(fb, R.activeCells(game), D.FIELD_X, D.FIELD_Y);
+      var next = R.cells(game.preview, 0).map(function (c) { return { row: c[0], col: c[1], tile: c[2] }; });
+      drawPiece(fb, next, D.NEXT_X, D.NEXT_Y);
+    }
+    drawNumberRight(fb, game.shownScore, D.POS_SCORE[0], D.POS_SCORE[1]);
+    drawNumberRight(fb, game.level, D.POS_LEVEL[0], D.POS_LEVEL[1]);
+    drawNumberRight(fb, game.shownLines, D.POS_LINES[0], D.POS_LINES[1]);
+    if (opts.label) drawFieldLabel(fb, opts.label);
+  }
+
+  // A boxed label across the middle of the field.
+  function drawFieldLabel(fb, text) {
+    var col = 2 + Math.floor((10 - text.length) / 2);
+    fillRect(fb, 16, 60, 80, 24, 0);
+    fillRect(fb, 16, 61, 80, 1, 3);
+    fillRect(fb, 16, 82, 80, 1, 3);
+    drawText(fb, text, col, 8);
+  }
+
+  // ---- Pixel primitives for menu art. ----
+  function pset(fb, x, y, shade) {
+    if (x >= 0 && x < W && y >= 0 && y < H) fb[y * W + x] = shade;
+  }
+
+  // Fills a polygon (scanline, pixel centers). pts: [[x, y], ...].
+  function fillPoly(fb, pts, shade) {
+    var minY = Infinity, maxY = -Infinity, i;
+    for (i = 0; i < pts.length; i++) { minY = Math.min(minY, pts[i][1]); maxY = Math.max(maxY, pts[i][1]); }
+    for (var y = Math.ceil(minY); y < maxY; y++) {
+      var cy = y + 0.5, xs = [];
+      for (i = 0; i < pts.length; i++) {
+        var a = pts[i], b = pts[(i + 1) % pts.length];
+        if ((a[1] <= cy && b[1] > cy) || (b[1] <= cy && a[1] > cy)) {
+          xs.push(a[0] + (cy - a[1]) * (b[0] - a[0]) / (b[1] - a[1]));
+        }
+      }
+      xs.sort(function (p, q) { return p - q; });
+      for (var k = 0; k + 1 < xs.length; k += 2) {
+        for (var x = Math.ceil(xs[k] - 0.5); x < Math.ceil(xs[k + 1] - 0.5); x++) pset(fb, x, y, shade);
+      }
+    }
+  }
+
+  function fillCircle(fb, cx, cy, r, shade) {
+    for (var y = -r; y <= r; y++) for (var x = -r; x <= r; x++) {
+      if (x * x + y * y <= r * r + r) pset(fb, cx + x, cy + y, shade);
+    }
+  }
+
+  function tileRect(fb, tile, col, row, w, h) {
+    for (var r = row; r < row + h; r++) for (var c = col; c < col + w; c++) blit(fb, tile, c * 8, r * 8);
+  }
+
+  // Rounded box in pixels: darkest 2px outline, lightest inside.
+  function drawBox(fb, x, y, w, h) {
+    fillRect(fb, x + 1, y, w - 2, h, 3);
+    fillRect(fb, x, y + 1, w, h - 2, 3);
+    fillRect(fb, x + 2, y + 2, w - 4, h - 4, 0);
+  }
+
+  // ---- Title screen (layout_titleScreen.bin structure, art redrawn). ----
+  // Logo letter stem: outlined bar with the four shade bands of the logo.
+  function stem(fb, x, y, w, h) {
+    fillRect(fb, x, y, w, h, 3);
+    var bands = [0, 1, 2];
+    var bh = Math.floor((h - 2) / 4);
+    for (var i = 0; i < 3; i++) fillRect(fb, x + 2, y + 2 + i * bh, w - 4, bh, bands[i]);
+  }
+
+  // Logo wedge: darkest triangle with a dark-mid core.
+  function wedge(fb, pts) {
+    fillPoly(fb, pts, 3);
+    var cx = 0, cy = 0;
+    pts.forEach(function (p) { cx += p[0] / pts.length; cy += p[1] / pts.length; });
+    fillPoly(fb, pts.map(function (p) { return [cx + (p[0] - cx) * 0.45, cy + (p[1] - cy) * 0.45]; }), 2);
+  }
+
+  function drawLogo(fb) {
+    var top = 14, h = 34;
+    // T
+    wedge(fb, [[10, top], [17, top], [17, top + 11]]);
+    stem(fb, 17, top, 7, h);
+    wedge(fb, [[24, top], [31, top], [24, top + 11]]);
+    // E
+    stem(fb, 35, top, 7, h);
+    wedge(fb, [[42, top], [50, top], [42, top + 11]]);
+    wedge(fb, [[43, top + 17], [50, top + 10], [50, top + 24]]);
+    wedge(fb, [[42, top + h], [50, top + h], [42, top + h - 11]]);
+    // T
+    wedge(fb, [[54, top], [61, top], [61, top + 11]]);
+    stem(fb, 61, top, 7, h);
+    wedge(fb, [[68, top], [75, top], [68, top + 11]]);
+    // R
+    stem(fb, 79, top, 7, h);
+    fillPoly(fb, [[86, top], [92, top], [97, top + 5], [97, top + 12], [92, top + 17], [86, top + 17]], 3);
+    fillPoly(fb, [[86, top + 4], [90, top + 4], [92, top + 7], [92, top + 10], [90, top + 13], [86, top + 13]], 1);
+    fillPoly(fb, [[86, top + 17], [92, top + 17], [99, top + h], [93, top + h]], 3);
+    // I
+    stem(fb, 102, top, 7, h);
+    // S: slanted band with end wedges
+    fillPoly(fb, [[113, top], [130, top], [130, top + 6], [119, top + 6]], 3);
+    fillPoly(fb, [[113, top], [119, top + 6], [134, top + h - 6], [128, top + h]], 3);
+    fillPoly(fb, [[112, top + h - 6], [128, top + h - 6], [128, top + h], [112, top + h]], 3);
+    fillPoly(fb, [[118, top + 9], [121, top + 9], [129, top + h - 9], [126, top + h - 9]], 2);
+    // TM
+    var tm = ['###.#...#', '.#..##.##', '.#..#.#.#', '.#..#...#'];
+    for (var y = 0; y < tm.length; y++) for (var x = 0; x < tm[y].length; x++) {
+      if (tm[y][x] === '#') pset(fb, 138 + x, top - 2 + y, 3);
+    }
+  }
+
+  // Onion dome: striped bulb with a spire and knob.
+  function drawDome(fb, cx, base, halfW, height) {
+    var pts = [], i, t;
+    for (i = 0; i <= 16; i++) {
+      t = i / 16; // 0 top .. 1 base
+      var w = halfW * Math.pow(Math.sin(Math.PI * Math.min(1, t * 0.95 + 0.05) * 0.75), 1.6);
+      pts.push([cx + w, base - height + t * height]);
+    }
+    for (i = 16; i >= 0; i--) {
+      t = i / 16;
+      var w2 = halfW * Math.pow(Math.sin(Math.PI * Math.min(1, t * 0.95 + 0.05) * 0.75), 1.6);
+      pts.push([cx - w2, base - height + t * height]);
+    }
+    fillPoly(fb, pts, 3);
+    var inner = pts.map(function (p) { return [cx + (p[0] - cx) * 0.86, base - (base - p[1]) * 0.94]; });
+    fillPoly(fb, inner, 0);
+    // Stripes: curved bands toward the tip.
+    for (var s = -2; s <= 2; s++) {
+      if (s === 0) continue;
+      var band = [];
+      for (i = 2; i <= 16; i++) {
+        t = i / 16;
+        var wi = halfW * 0.86 * Math.pow(Math.sin(Math.PI * Math.min(1, t * 0.95 + 0.05) * 0.75), 1.6);
+        band.push([cx + wi * s / 2.6, base - height * 0.94 + t * height * 0.94]);
+      }
+      for (i = 16; i >= 2; i--) {
+        t = i / 16;
+        var wj = halfW * 0.86 * Math.pow(Math.sin(Math.PI * Math.min(1, t * 0.95 + 0.05) * 0.75), 1.6);
+        band.push([cx + wj * (s + (s > 0 ? 0.7 : -0.7)) / 2.6, base - height * 0.94 + t * height * 0.94]);
+      }
+      fillPoly(fb, band, Math.abs(s) === 1 ? 1 : 2);
+    }
+    fillRect(fb, cx - halfW + 2, base - 2, halfW * 2 - 3, 2, 3);
+    fillRect(fb, cx, base - height - 9, 1, 9, 3);
+    fillCircle(fb, cx, base - height - 11, 2, 3);
+    fillRect(fb, cx, base - height - 12, 1, 2, 0);
+  }
+
+  function renderTitle(fb) {
+    fill(fb, 0);
+    // Top band and logo panel (rows 0..6).
+    fillRect(fb, 0, 0, W, 8, 3);
+    fillRect(fb, 0, 8, W, 48, 3);
+    fillRect(fb, 3, 9, W - 6, 46, 0);
+    fillRect(fb, 5, 11, W - 10, 1, 2);
+    fillRect(fb, 5, 52, W - 10, 1, 2);
+    drawLogo(fb);
+    // Sky scene (rows 7..12).
+    fillRect(fb, 0, 56, W, 48, 1);
+    fillRect(fb, 0, 56, W, 3, 2);
+    fillRect(fb, 0, 59, W, 1, 3);
+    fillRect(fb, 0, 56, 8, 48, 3);
+    fillRect(fb, 152, 56, 8, 48, 3);
+    fillCircle(fb, 29, 73, 6, 0);
+    [[59, 67], [75, 76], [105, 66], [132, 67], [44, 87], [96, 80], [12, 75]].forEach(function (p) {
+      pset(fb, p[0], p[1], 0);
+    });
+    // Distant skyline.
+    fillPoly(fb, [[78, 104], [80, 94], [82, 104]], 2);
+    fillPoly(fb, [[89, 104], [92, 88], [95, 104]], 2);
+    fillCircle(fb, 85, 99, 4, 2);
+    fillRect(fb, 81, 99, 9, 5, 2);
+    fillPoly(fb, [[98, 104], [101, 96], [104, 104]], 2);
+    fillRect(fb, 70, 98, 3, 6, 2);
+    fillRect(fb, 66, 101, 12, 3, 2);
+    drawDome(fb, 121, 103, 15, 28);
+    drawDome(fb, 147, 103, 7, 10);
+    // Ground band (row 13).
+    fillRect(fb, 0, 104, W, 8, 3);
+    // Menu: 1 PLAYER only (2 PLAYER slot left empty). Cursor before it.
+    drawText(fb, '\u25b6', 1, 14);
+    drawText(fb, '1PLAYER', 2, 14);
+    fillRect(fb, 16, 122, 56, 1, 2);
+    drawText(fb, '\u00a91989 Nintendo', 3, 16);
+  }
+
+  // Dotted background with the A-TYPE frame (assumption I9: screens without a
+  // reference image copy the A-TYPE style).
+  function drawMenuBackground(fb) {
+    tileRect(fb, D.TILES.dots, 0, 0, 20, 18);
+    fillRect(fb, 0, 0, W, 3, 3); fillRect(fb, 0, H - 3, W, 3, 3);
+    fillRect(fb, 0, 0, 3, H, 3); fillRect(fb, W - 3, 0, 3, H, 3);
+    fillRect(fb, 3, 3, W - 6, 1, 0); fillRect(fb, 3, H - 4, W - 6, 1, 0);
+    fillRect(fb, 3, 3, 1, H - 6, 0); fillRect(fb, W - 4, 3, 1, H - 6, 0);
+  }
+
+  // A label on a lightest strip, as the A-TYPE header.
+  function drawHeader(fb, text) {
+    fillRect(fb, 8, 8, (text.length + 2) * 8, 8, 0);
+    drawText(fb, text, 2, 1);
+  }
+
+  // ---- Top 10 screen (I9 style). ----
+  function renderTop10(fb, scores) {
+    drawMenuBackground(fb);
+    drawHeader(fb, 'TOP 10');
+    drawBox(fb, 8, 24, 144, 96);
+    for (var i = 0; i < 10; i++) {
+      drawNumberRight(fb, i + 1, 3, 4 + i);
+      drawScoreRow(fb, scores[i], 5, 12, 4 + i);
+    }
+    fillRect(fb, 56, 128, 24, 8, 0);
+    drawText(fb, 'ESC', 7, 16);
+  }
+
+  // ---- Name entry (I9 style). The current character flashes every 7 frames
+  // (menuScreens.s $1932). ----
+  function renderNameEntry(fb, ne, score, rank) {
+    drawMenuBackground(fb);
+    drawHeader(fb, 'HIGH SCORE');
+    drawBox(fb, 24, 32, 112, 32);
+    drawText(fb, 'NO.', 4, 5);
+    drawNumberRight(fb, rank + 1, 8, 5);
+    drawNumberRight(fb, score, 15, 5);
+    drawText(fb, 'NAME', 4, 6);
+    drawBox(fb, 40, 80, 80, 24);
+    var flashOff = Math.floor(ne.frame / 7) % 2 === 1;
+    for (var i = 0; i < 6; i++) {
+      var ch = ne.chars[i] === null ? '_' : ne.chars[i];
+      if (i === ne.pos && flashOff) ch = ' ';
+      drawText(fb, ch, 7 + i, 11);
+    }
+    drawText(fb, '\u2191', 7 + ne.pos, 12, 3, 0);
+  }
+
+  // ---- Keys screen (I9 style). ----
+  var KEY_NAMES = { left: 'LEFT', right: 'RIGHT', down: 'DOWN', rotate: 'ROTATE', start: 'START', music: 'MUSIC', reset: 'RESET' };
+
+  function renderKeys(fb, ks, bindings) {
+    drawMenuBackground(fb);
+    drawHeader(fb, 'KEYS');
+    drawBox(fb, 8, 24, 144, 80);
+    var rows = GB.APP.KEY_ROWS;
+    for (var i = 0; i < rows.length; i++) {
+      var r = i < 6 ? 4 + i : 11;
+      if (i === ks.row) drawText(fb, '\u25b6', 2, r);
+      drawText(fb, KEY_NAMES[rows[i]], 3, r);
+      if (i < 6) {
+        var label = ks.capturing && i === ks.row ? '________' : GB.APP.keyLabel(bindings[rows[i]]);
+        drawText(fb, label, 10, r);
+      }
+    }
+    if (ks.message) {
+      fillRect(fb, 8, 112, 144, 8, 0);
+      drawText(fb, ks.message, 10 - Math.ceil(ks.message.length / 2), 14);
+    }
+    fillRect(fb, 16, 128, 128, 8, 0);
+    drawText(fb, '\u2191\u2193 ENTER ESC', 3, 16);
+  }
+
+  // ---- A-TYPE level select (layout_aTypeSelectionScreen.bin structure). ----
+  // blinkOn: the chosen level's digit shows dark (it flashes every 16 frames).
+  function renderLevelSelect(fb, level, blinkOn, top3) {
+    drawMenuBackground(fb);
+    drawHeader(fb, 'A-TYPE');
+    // LEVEL box and the level grid (rows 3..9).
+    drawBox(fb, 48, 26, 56, 17);
+    drawText(fb, 'LEVEL', 7, 4);
+    drawBox(fb, 32, 44, 88, 31);
+    fillRect(fb, 34, 57, 84, 6, 3);
+    for (var lv = 0; lv < 10; lv++) {
+      var cell = D.LEVEL_CELLS[lv];
+      var dark = lv === level && blinkOn;
+      drawText(fb, String(lv), cell[0], cell[1], dark ? 3 : 1, 0);
+      if (lv % 5 !== 4) fillRect(fb, (cell[0] + 1) * 8 + 3, cell[1] * 8, 2, 8, 3);
+    }
+    // TOP-SCORE box and the top-3 panel (rows 10..16).
+    drawBox(fb, 32, 81, 88, 17);
+    drawText(fb, 'TOP-SCORE', 5, 11);
+    drawBox(fb, 8, 98, 144, 36);
+    fillRect(fb, 26, 100, 2, 32, 3);
+    for (var i = 0; i < 3; i++) {
+      drawText(fb, String(i + 1), 2, 13 + i);
+      drawScoreRow(fb, top3 && top3[i], 4, 12, 13 + i);
+    }
+  }
+
+  // One score row: 6-char name at nameCol, score right-aligned to end at
+  // scoreCol + 5. Empty rows show dotted lines (requirements 2.5).
+  function drawScoreRow(fb, entry, nameCol, scoreCol, row) {
+    if (!entry) {
+      drawText(fb, '______', nameCol, row);
+      drawText(fb, '______', scoreCol, row);
+      return;
+    }
+    var name = (entry.name + '______').slice(0, 6);
+    drawText(fb, name, nameCol, row);
+    drawNumberRight(fb, entry.score, scoreCol + 5, row);
+  }
+
+  // FNV-1a hash of a framebuffer, for golden tests.
+  function hash(fb) {
+    var h = 2166136261;
+    for (var i = 0; i < fb.length; i++) { h ^= fb[i]; h = Math.imul(h, 16777619) >>> 0; }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  return {
+    createFramebuffer: createFramebuffer,
+    fill: fill,
+    blit: blit,
+    fillRect: fillRect,
+    drawText: drawText,
+    drawNumberRight: drawNumberRight,
+    drawLayout: drawLayout,
+    drawField: drawField,
+    renderPlay: renderPlay,
+    drawFieldLabel: drawFieldLabel,
+    fillPoly: fillPoly,
+    fillCircle: fillCircle,
+    drawBox: drawBox,
+    drawScoreRow: drawScoreRow,
+    renderTitle: renderTitle,
+    renderLevelSelect: renderLevelSelect,
+    renderTop10: renderTop10,
+    renderNameEntry: renderNameEntry,
+    renderKeys: renderKeys,
+    hash: hash
+  };
+})();
+
+/* ===== APP ===== */
+GB.APP = (function () {
+  'use strict';
+  var C = GB.CONST;
+
+  // Fixed-timestep accumulator. advance(nowMs) returns how many game frames
+  // to run. Catch-up is capped; when the cap is hit (for example after a tab
+  // restore) the rest of the backlog is dropped.
+  function createTicker(fps, maxSteps) {
+    var stepMs = 1000 / (fps || C.FPS);
+    var cap = maxSteps || 5;
+    var acc = 0, last = null;
+    return {
+      advance: function (now) {
+        if (last === null) { last = now; return 0; }
+        var dt = Math.max(0, now - last);
+        last = now;
+        acc += dt;
+        var n = Math.floor(acc / stepMs);
+        if (n > cap) { n = cap; acc = 0; } else { acc -= n * stepMs; }
+        return n;
+      },
+      reset: function () { acc = 0; last = null; }
+    };
+  }
+
+  // ---- Input: keys to the six actions. ----
+  var ACTIONS = ['left', 'right', 'down', 'rotate', 'start', 'music'];
+  // Requirements 2.4 defaults. Values are KeyboardEvent.code (physical keys).
+  var DEFAULT_BINDINGS = {
+    left: 'ArrowLeft', right: 'ArrowRight', down: 'ArrowDown',
+    rotate: 'ArrowUp', start: 'Enter', music: 'KeyM'
+  };
+  var ARROWS = { ArrowLeft: 1, ArrowRight: 1, ArrowUp: 1, ArrowDown: 1 };
+
+  function emptyActions() {
+    return { left: false, right: false, down: false, rotate: false, start: false, music: false };
+  }
+
+  // Tracks held keys and press edges. Hold timing comes from game frames, so
+  // OS key-repeat events are ignored. Ctrl, Alt and Meta combos are ignored
+  // (assumption I2). getBindings returns the live table.
+  function createInput(getBindings) {
+    var down = {};        // code -> true while held
+    var pressed = {};     // code -> true, pressed since the last frame
+
+    function actionOf(code) {
+      var b = getBindings();
+      for (var i = 0; i < ACTIONS.length; i++) if (b[ACTIONS[i]] === code) return ACTIONS[i];
+      return null;
+    }
+
+    // e: { code, repeat, ctrlKey, altKey, metaKey }. Returns true when the
+    // page should call preventDefault.
+    function keyDown(e) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      var bound = actionOf(e.code) !== null;
+      var block = bound || !!ARROWS[e.code];
+      if (e.repeat) return block;
+      down[e.code] = true;
+      pressed[e.code] = true;
+      return block;
+    }
+
+    function keyUp(e) {
+      delete down[e.code];
+      return actionOf(e.code) !== null || !!ARROWS[e.code];
+    }
+
+    function clear() { down = {}; pressed = {}; }
+
+    // Snapshot for one game frame. A tap that started and ended inside the
+    // frame still counts as held for that frame.
+    function frame() {
+      var b = getBindings();
+      var held = emptyActions(), edge = emptyActions();
+      for (var i = 0; i < ACTIONS.length; i++) {
+        var a = ACTIONS[i], code = b[a];
+        edge[a] = !!pressed[code];
+        held[a] = !!down[code] || edge[a];
+      }
+      var codes = Object.keys(pressed);
+      pressed = {};
+      // codes: raw keys pressed this frame, for the fixed keys H, K and Esc.
+      return { held: held, pressed: edge, codes: codes };
+    }
+
+    return { keyDown: keyDown, keyUp: keyUp, clear: clear, frame: frame };
+  }
+
+  // ---- Play session. ----
+  function createPlay(opts) {
+    var R = GB.RULES;
+    var self = {
+      game: R.createGame({ startLevel: opts.startLevel || 0, rng: opts.rng }),
+      paused: false
+    };
+
+    self.pause = function () { if (!self.game.over) self.paused = true; };
+
+    self.step = function (input) {
+      if (self.game.over) return [];
+      var p = input.pressed, h = input.held;
+      if (p.start) self.paused = !self.paused;
+      if (self.paused) return [];
+      return R.step(self.game, { left: h.left, right: h.right, down: h.down, rotate: p.rotate });
+    };
+
+    self.render = function (fb, label) {
+      GB.VIEW.renderPlay(fb, self.game, { label: label || (self.paused ? 'PAUSE' : '') });
+    };
+
+    return self;
+  }
+
+  // ---- Level select rules (menuScreens.s GameState11_ATypeSelectionMain). ----
+  // Right stops at 9 and wraps 4 -> 5, left stops at 0, up (rotate) and down
+  // move between the rows. Returns the new level.
+  function levelSelectMove(level, p) {
+    if (p.right) return level === 9 ? level : level + 1;
+    if (p.left) return level === 0 ? level : level - 1;
+    if (p.rotate) return level >= 5 ? level - 5 : level;
+    if (p.down) return level < 5 ? level + 5 : level;
+    return level;
+  }
+
+  // Selected digit flashes every 16 frames (menuScreens.s $176d).
+  var BLINK_FRAMES = 16;
+  // Game over banner (assumption I4): 3 seconds, start skips after 1 second.
+  var GAME_OVER_FRAMES = Math.round(3 * C.FPS);
+  var GAME_OVER_SKIP = Math.round(1 * C.FPS);
+
+  // ---- High scores (requirements 2.5 and 5). ----
+  var MAX_SCORES = 10;
+  var NAME_LEN = 6;
+  // Name characters, in the ROM order (menuScreens.s $1992..$19ca without the
+  // heart): A..Z, '.', '-', multiply sign (stored as '*'), then blank.
+  var NAME_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ.-* ';
+
+  function validName(n) {
+    if (typeof n !== 'string' || n.length < 1 || n.length > NAME_LEN) return false;
+    for (var i = 0; i < n.length; i++) if (NAME_CHARS.indexOf(n[i]) < 0) return false;
+    return true;
+  }
+
+  function validScore(v) {
+    return typeof v === 'number' && Math.floor(v) === v && v >= 0 && v <= C.MAX_SCORE;
+  }
+
+  // Keeps valid entries only, at most 10, highest first (stable for ties).
+  function validateScores(raw) {
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    for (var i = 0; i < raw.length && out.length < MAX_SCORES; i++) {
+      var e = raw[i];
+      if (e && typeof e === 'object' && validName(e.name) && validScore(e.score)) {
+        out.push({ name: e.name, score: e.score });
+      }
+    }
+    out.forEach(function (e, k) { e.k = k; });
+    out.sort(function (x, y) { return y.score - x.score || x.k - y.k; });
+    return out.map(function (e) { return { name: e.name, score: e.score }; });
+  }
+
+  // Requirements 5: above 0, and fewer than 10 entries or above the 10th.
+  function qualifies(list, score) {
+    if (!(score > 0)) return false;
+    return list.length < MAX_SCORES || score > list[MAX_SCORES - 1].score;
+  }
+
+  // Rank (0-based) a new score takes. Ties rank below older equal scores.
+  function rankOf(list, score) {
+    var i = 0;
+    while (i < list.length && list[i].score >= score) i++;
+    return i;
+  }
+
+  function insertScore(list, entry) {
+    var out = list.slice();
+    var r = rankOf(out, entry.score);
+    out.splice(r, 0, { name: entry.name, score: entry.score });
+    return { list: out.slice(0, MAX_SCORES), rank: r };
+  }
+
+  // ---- Storage adapter. getBackend returns a localStorage-like object and may
+  // throw. Every access is guarded; on any failure ok becomes false and values
+  // live in memory only. Loaded values pass a validator or fall back.
+  function createStore(getBackend) {
+    var store = { ok: true };
+    var memory = {};
+    var backend = null;
+    try {
+      backend = getBackend();
+      var probe = C.STORAGE_PREFIX + 'probe';
+      backend.setItem(probe, '1');
+      backend.removeItem(probe);
+    } catch (e) {
+      backend = null;
+      store.ok = false;
+    }
+
+    store.load = function (name, validate, fallback) {
+      var raw = null;
+      if (backend) {
+        try { raw = backend.getItem(C.STORAGE_PREFIX + name); } catch (e) { store.ok = false; }
+      } else if (Object.prototype.hasOwnProperty.call(memory, name)) {
+        raw = memory[name];
+      }
+      if (raw === null || raw === undefined) return fallback();
+      try { return validate(JSON.parse(raw)); } catch (e) { return fallback(); }
+    };
+
+    store.save = function (name, value) {
+      var text = JSON.stringify(value);
+      memory[name] = text;
+      if (!backend) return false;
+      try {
+        backend.setItem(C.STORAGE_PREFIX + name, text);
+        return true;
+      } catch (e) {
+        store.ok = false;
+        return false;
+      }
+    };
+
+    return store;
+  }
+
+  // ---- Name entry (requirements 2.5). Up and down change the character with
+  // the ROM hold repeat (23 then 9 frames, menuScreens.s $194a, $1985), left
+  // and right move the cursor, start confirms. Untouched places stay dotted.
+  function createNameEntry() {
+    var ne = { chars: ['A', null, null, null, null, null], pos: 0, sticky: C.DAS_DELAY, frame: 0 };
+
+    function cycle(ch, dir) {
+      var i = NAME_CHARS.indexOf(ch);
+      return NAME_CHARS[(i + dir + NAME_CHARS.length) % NAME_CHARS.length];
+    }
+
+    // Returns the name when confirmed, else null.
+    ne.step = function (inp) {
+      var p = inp.pressed, h = inp.held;
+      ne.frame++;
+      if (p.start) {
+        var name = '';
+        for (var i = 0; i < NAME_LEN && ne.chars[i] !== null; i++) name += ne.chars[i];
+        return name;
+      }
+      // Up (the rotate key) goes forward (A to B), down goes back.
+      var delta = 0;
+      if (p.rotate) { ne.sticky = C.DAS_DELAY; delta = 1; }
+      else if (h.rotate) { if (--ne.sticky === 0) { ne.sticky = C.DAS_REPEAT; delta = 1; } }
+      else if (p.down) { ne.sticky = C.DAS_DELAY; delta = -1; }
+      else if (h.down) { if (--ne.sticky === 0) { ne.sticky = C.DAS_REPEAT; delta = -1; } }
+      if (delta) {
+        ne.chars[ne.pos] = cycle(ne.chars[ne.pos], delta);
+        return null;
+      }
+      if (p.right && ne.pos < NAME_LEN - 1) {
+        ne.pos++;
+        if (ne.chars[ne.pos] === null) ne.chars[ne.pos] = 'A';
+      } else if (p.left && ne.pos > 0) {
+        ne.pos--;
+      }
+      return null;
+    };
+
+    return ne;
+  }
+
+  // ---- Key bindings (requirements 2.4 and 5). ----
+  // Reserved: H, K and Esc. Ctrl, Alt and Meta combos never reach here (I2).
+  var RESERVED = { KeyH: 1, KeyK: 1, Escape: 1 };
+
+  function isCode(c) { return typeof c === 'string' && /^[A-Za-z0-9]{1,32}$/.test(c); }
+
+  // Checks binding code to action. Returns { ok, reason }.
+  function checkBinding(bindings, action, code) {
+    if (!isCode(code)) return { ok: false, reason: 'BAD KEY' };
+    if (RESERVED[code]) return { ok: false, reason: 'RESERVED KEY' };
+    for (var i = 0; i < ACTIONS.length; i++) {
+      var a = ACTIONS[i];
+      if (a !== action && bindings[a] === code) return { ok: false, reason: 'KEY IN USE' };
+    }
+    return { ok: true, reason: '' };
+  }
+
+  // Loaded tables must hold six unique, non-reserved codes; else defaults.
+  function validateBindings(raw) {
+    var out = {}, seen = {};
+    if (!raw || typeof raw !== 'object') return Object.assign({}, DEFAULT_BINDINGS);
+    for (var i = 0; i < ACTIONS.length; i++) {
+      var code = raw[ACTIONS[i]];
+      if (!isCode(code) || RESERVED[code] || seen[code]) return Object.assign({}, DEFAULT_BINDINGS);
+      seen[code] = true;
+      out[ACTIONS[i]] = code;
+    }
+    return out;
+  }
+
+  // Short key label: arrows as words, KeyX -> X, DigitN -> N, others
+  // uppercased and cut to 8 characters.
+  function keyLabel(code) {
+    var arrows = { ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', ArrowUp: 'UP', ArrowDown: 'DOWN' };
+    if (arrows[code]) return arrows[code];
+    var m = /^(?:Key|Digit)([A-Z0-9])$/.exec(code);
+    if (m) return m[1];
+    return String(code).toUpperCase().slice(0, 8);
+  }
+
+  var KEY_ROWS = ['left', 'right', 'down', 'rotate', 'start', 'music', 'reset'];
+  var MESSAGE_FRAMES = 90;
+
+  // ---- Keys screen model. Navigation is fixed: arrows, Enter and Esc. ----
+  // onChange(bindings) runs after each accepted change.
+  function createKeysScreen(getBindings, onChange) {
+    var ks = { row: 0, capturing: false, message: '', messageTimer: 0, done: false };
+
+    function say(text) { ks.message = text; ks.messageTimer = MESSAGE_FRAMES; }
+
+    ks.step = function (codes) {
+      if (ks.messageTimer > 0 && --ks.messageTimer === 0) ks.message = '';
+      for (var i = 0; i < codes.length; i++) {
+        var code = codes[i];
+        if (ks.capturing) {
+          ks.capturing = false;
+          if (code === 'Escape') { say(''); continue; }
+          var action = KEY_ROWS[ks.row];
+          var b = getBindings();
+          var res = checkBinding(b, action, code);
+          if (!res.ok) { say(res.reason); continue; }
+          var next = Object.assign({}, b);
+          next[action] = code;
+          onChange(next);
+          say('SAVED');
+          continue;
+        }
+        if (code === 'Escape') { ks.done = true; return; }
+        if (code === 'ArrowUp') ks.row = (ks.row + KEY_ROWS.length - 1) % KEY_ROWS.length;
+        else if (code === 'ArrowDown') ks.row = (ks.row + 1) % KEY_ROWS.length;
+        else if (code === 'Enter') {
+          if (KEY_ROWS[ks.row] === 'reset') { onChange(Object.assign({}, DEFAULT_BINDINGS)); say('DEFAULTS'); }
+          else { ks.capturing = true; say('PRESS A KEY'); }
+        }
+      }
+    };
+
+    return ks;
+  }
+
+  // ---- Music sequencer (pure). Note times are computed from the loop index
+  // and the offset inside the loop, so they do not drift over many loops.
+  function createSequencer(song) {
+    var spb = 60 / song.bpm;
+    var voices = song.voices.map(function (v, vi) {
+      var t = 0, events = [];
+      v.notes.forEach(function (n) {
+        if (n[0] > 0) events.push({ voice: vi, midi: n[0], offset: t * spb, dur: n[1] * spb });
+        t += n[1];
+      });
+      return { beats: t, events: events };
+    });
+    var loopBeats = voices[0].beats;
+    var seq = { loopLength: loopBeats * spb, voices: voices };
+
+    // Events with start time in [t0, t1), times relative to song start.
+    seq.eventsBetween = function (t0, t1) {
+      var out = [];
+      var L = seq.loopLength;
+      var first = Math.max(0, Math.floor(t0 / L));
+      var last = Math.floor(t1 / L);
+      for (var loop = first; loop <= last; loop++) {
+        for (var vi = 0; vi < voices.length; vi++) {
+          var ev = voices[vi].events;
+          for (var i = 0; i < ev.length; i++) {
+            var at = loop * L + ev[i].offset;
+            if (at >= t0 && at < t1) out.push({ voice: vi, midi: ev[i].midi, time: at, dur: ev[i].dur });
+          }
+        }
+      }
+      out.sort(function (a, b) { return a.time - b.time || a.voice - b.voice; });
+      return out;
+    };
+    return seq;
+  }
+
+  function midiToHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+  // Requirements 2.6: music plays during play, pauses on pause, stops on game
+  // over and is silent on every other screen.
+  function musicMode(app) {
+    if (app.screen !== 'play') return 'stop';
+    return app.play.paused ? 'pause' : 'play';
+  }
+
+  // Legend text outside the screen (requirements 5): fixed hotkeys, current
+  // bindings and the music state. Returns [[key, what], ...].
+  function legendItems(bindings, musicOn) {
+    return [
+      ['H', 'Top 10'], ['K', 'Keys'],
+      [keyLabel(bindings.left), 'Left'], [keyLabel(bindings.right), 'Right'],
+      [keyLabel(bindings.down), 'Drop'], [keyLabel(bindings.rotate), 'Rotate'],
+      [keyLabel(bindings.start), 'Start/Pause'],
+      [keyLabel(bindings.music), 'Music ' + (musicOn ? 'ON' : 'OFF')]
+    ];
+  }
+
+  // ---- Screen state machine. ----
+  // Screens: title, levelSelect, play, gameOver. Each has enter, update and
+  // render. opts.rng feeds the randomizer.
+  function createApp(opts) {
+    var V = GB.VIEW;
+    var store = opts.store || createStore(function () { throw new Error('no storage'); });
+    var app = {
+      screen: null,
+      level: 0,
+      play: null,
+      timer: 0,
+      blinkOn: true,
+      store: store,
+      scores: store.load('scores', validateScores, function () { return []; }),
+      entry: null,
+      entryRank: 0,
+      bindings: store.load('bindings', validateBindings, function () { return Object.assign({}, DEFAULT_BINDINGS); }),
+      keys: null,
+      musicOn: store.load('music', function (v) { return typeof v === 'boolean' ? v : true; }, function () { return true; })
+    };
+
+    function has(codes, code) { return !!codes && codes.indexOf(code) >= 0; }
+
+    var screens = {
+      title: {
+        enter: function () {},
+        update: function (inp) {
+          if (inp.pressed.start) go('levelSelect');
+          else if (has(inp.codes, 'KeyH')) go('top10');
+          else if (has(inp.codes, 'KeyK')) go('keys');
+        },
+        render: function (fb) { V.renderTitle(fb); }
+      },
+      top10: {
+        enter: function () {},
+        // Assumption I5: Esc or the bound start key returns to the title.
+        update: function (inp) { if (inp.pressed.start || has(inp.codes, 'Escape')) go('title'); },
+        render: function (fb) { V.renderTop10(fb, app.scores); }
+      },
+      keys: {
+        enter: function () {
+          app.keys = createKeysScreen(function () { return app.bindings; }, function (next) {
+            app.bindings = next;
+            store.save('bindings', next);
+          });
+        },
+        update: function (inp) {
+          app.keys.step(inp.codes || []);
+          if (app.keys.done) go('title');
+        },
+        render: function (fb) { V.renderKeys(fb, app.keys, app.bindings); }
+      },
+      nameEntry: {
+        enter: function () { app.entry = createNameEntry(); },
+        update: function (inp) {
+          var name = app.entry.step(inp);
+          if (name === null) return;
+          var res = insertScore(app.scores, { name: name, score: app.play.game.score });
+          app.scores = res.list;
+          store.save('scores', app.scores);
+          go('title');
+        },
+        render: function (fb) {
+          V.renderNameEntry(fb, app.entry, app.play.game.score, app.entryRank);
+        }
+      },
+      levelSelect: {
+        enter: function () { app.timer = 0; app.blinkOn = true; },
+        update: function (inp) {
+          if (inp.pressed.start) { go('play'); return; }
+          app.level = levelSelectMove(app.level, inp.pressed);
+          if (++app.timer >= BLINK_FRAMES) { app.timer = 0; app.blinkOn = !app.blinkOn; }
+        },
+        render: function (fb) { V.renderLevelSelect(fb, app.level, app.blinkOn, app.scores.slice(0, 3)); }
+      },
+      play: {
+        enter: function () { app.play = createPlay({ startLevel: app.level, rng: opts.rng }); },
+        update: function (inp) {
+          app.play.step(inp);
+          if (app.play.game.over) go('gameOver');
+        },
+        render: function (fb) { app.play.render(fb); }
+      },
+      gameOver: {
+        enter: function () { app.timer = 0; },
+        update: function (inp) {
+          app.timer++;
+          if (app.timer >= GAME_OVER_FRAMES || (app.timer >= GAME_OVER_SKIP && inp.pressed.start)) {
+            var score = app.play.game.score;
+            if (qualifies(app.scores, score)) {
+              app.entryRank = rankOf(app.scores, score);
+              go('nameEntry');
+            } else {
+              go('title');
+            }
+          }
+        },
+        render: function (fb) { app.play.render(fb, 'GAME OVER'); }
+      }
+    };
+
+    function go(name) {
+      app.screen = name;
+      screens[name].enter();
+    }
+
+    app.step = function (inp) {
+      // Music toggle works on every screen (A4), except while the Keys screen
+      // waits for a key to bind.
+      var capturing = app.screen === 'keys' && app.keys.capturing;
+      if (inp.pressed.music && !capturing) {
+        app.musicOn = !app.musicOn;
+        store.save('music', app.musicOn);
+      }
+      screens[app.screen].update(inp);
+    };
+    app.musicMode = function () { return musicMode(app); };
+    app.render = function (fb) { screens[app.screen].render(fb); };
+    // Blur or hidden tab.
+    app.pause = function () { if (app.screen === 'play') app.play.pause(); };
+    app.go = go;
+
+    go('title');
+    return app;
+  }
+
+  return {
+    createTicker: createTicker,
+    ACTIONS: ACTIONS,
+    DEFAULT_BINDINGS: DEFAULT_BINDINGS,
+    createInput: createInput,
+    createPlay: createPlay,
+    levelSelectMove: levelSelectMove,
+    NAME_CHARS: NAME_CHARS,
+    validateScores: validateScores,
+    qualifies: qualifies,
+    rankOf: rankOf,
+    insertScore: insertScore,
+    createStore: createStore,
+    createNameEntry: createNameEntry,
+    RESERVED: RESERVED,
+    checkBinding: checkBinding,
+    validateBindings: validateBindings,
+    keyLabel: keyLabel,
+    KEY_ROWS: KEY_ROWS,
+    createKeysScreen: createKeysScreen,
+    createSequencer: createSequencer,
+    legendItems: legendItems,
+    midiToHz: midiToHz,
+    musicMode: musicMode,
+    GAME_OVER_FRAMES: GAME_OVER_FRAMES,
+    GAME_OVER_SKIP: GAME_OVER_SKIP,
+    createApp: createApp
+  };
+})();
+
+/* ==END LOGIC== */
+</script>
+
+<script>
+/* ===== PLATFORM ===== */
+var PLATFORM = (function () {
+  'use strict';
+  var C = GB.CONST, V = GB.VIEW;
+  var SW = C.SCREEN_W, SH = C.SCREEN_H;
+
+  function rgba(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return [n >> 16, (n >> 8) & 255, n & 255, 255];
+  }
+  var PAL = C.PALETTE.map(rgba);
+
+  // Screen: framebuffer -> 160x144 ImageData -> integer-scaled visible canvas.
+  function createScreen(canvas) {
+    var off = document.createElement('canvas');
+    off.width = SW; off.height = SH;
+    var offCtx = off.getContext('2d');
+    var image = offCtx.createImageData(SW, SH);
+    var ctx = canvas.getContext('2d');
+    var fb = V.createFramebuffer();
+
+    // Backing store at the largest integer factor that fits the shown size.
+    // CSS stretches the small remainder with image-rendering: pixelated.
+    function resize(cssW, cssH) {
+      var k = Math.max(1, Math.floor(Math.min(cssW / SW, cssH / SH)));
+      if (canvas.width !== SW * k) { canvas.width = SW * k; canvas.height = SH * k; }
+    }
+
+    function present() {
+      var d = image.data;
+      for (var i = 0; i < fb.length; i++) {
+        var p = PAL[fb[i]], j = i * 4;
+        d[j] = p[0]; d[j + 1] = p[1]; d[j + 2] = p[2]; d[j + 3] = 255;
+      }
+      offCtx.putImageData(image, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+    }
+
+    return { fb: fb, resize: resize, present: present };
+  }
+
+  // Device units (requirements 2.7): the body keeps its 90:148 aspect and
+  // fits the stage (window minus legend). The canvas backing store then
+  // takes the largest integer scale of its shown size in device pixels.
+  var DEVICE_W = 90, DEVICE_H = 148;
+
+  function fitDevice(stage, device, canvas, screen) {
+    function fit() {
+      var u = Math.min(stage.clientWidth / DEVICE_W, stage.clientHeight / DEVICE_H) * 0.96;
+      device.style.setProperty('--u', Math.max(1, u) + 'px');
+      var dpr = window.devicePixelRatio || 1;
+      screen.resize(canvas.clientWidth * dpr, canvas.clientHeight * dpr);
+    }
+    fit();
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(stage);
+    window.addEventListener('resize', fit);
+  }
+
+  // Legend: rebuilt only when the bindings or music state change.
+  function createLegend(el) {
+    var last = '';
+    return function update(items) {
+      var sig = JSON.stringify(items);
+      if (sig === last) return;
+      last = sig;
+      el.textContent = '';
+      items.forEach(function (it) {
+        var span = document.createElement('span');
+        span.className = 'item';
+        var k = document.createElement('kbd');
+        k.textContent = it[0];
+        span.appendChild(k);
+        span.appendChild(document.createTextNode(' ' + it[1]));
+        el.appendChild(span);
+        el.appendChild(document.createTextNode(' '));
+      });
+    };
+  }
+
+  // Runs app.step() at the fixed game rate and app.render(fb) once per
+  // animation frame.
+  function startLoop(app, screen) {
+    var ticker = GB.APP.createTicker(C.FPS, 5);
+    function frame(now) {
+      var n = ticker.advance(now);
+      for (var i = 0; i < n; i++) app.step();
+      app.render(screen.fb);
+      screen.present();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    return ticker;
+  }
+
+  // Keyboard, blur and visibility. onAway runs when the page loses focus or
+  // is hidden; onBack runs when it is visible again.
+  function bindInput(input, onAway, onBack) {
+    window.addEventListener('keydown', function (e) {
+      if (input.keyDown(e)) e.preventDefault();
+    });
+    window.addEventListener('keyup', function (e) {
+      if (input.keyUp(e)) e.preventDefault();
+    });
+    window.addEventListener('blur', onAway);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) onAway(); else onBack();
+    });
+  }
+
+  // ---- Audio: two pulse-style voices, lookahead scheduler. ----
+  // The AudioContext is created on the first key press (requirements 2.6,
+  // browsers block autoplay). Any WebAudio failure leaves the game silent.
+  var LOOKAHEAD = 0.1, TICK_MS = 25;
+
+  function pulseWave(ctx, duty) {
+    var n = 32, re = new Float32Array(n), im = new Float32Array(n);
+    for (var k = 1; k < n; k++) im[k] = (2 / (k * Math.PI)) * Math.sin(k * Math.PI * duty);
+    return ctx.createPeriodicWave(re, im);
+  }
+
+  function createAudio(song) {
+    var seq = GB.APP.createSequencer(song);
+    var ctx = null, master = null, waves = [], timer = null;
+    var mode = 'stop', muted = false, failed = false;
+    var origin = 0, cursor = 0, live = [];
+
+    function init() {
+      if (ctx || failed) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { failed = true; return; }
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = muted ? 0 : 1;
+        master.connect(ctx.destination);
+        waves = song.voices.map(function (v) { return pulseWave(ctx, v.duty); });
+      } catch (e) {
+        failed = true;
+        ctx = null;
+      }
+    }
+
+    function playNote(ev) {
+      var v = song.voices[ev.voice];
+      var t = origin + ev.time, end = t + ev.dur * 0.9;
+      var osc = ctx.createOscillator();
+      var g = ctx.createGain();
+      osc.setPeriodicWave(waves[ev.voice]);
+      osc.frequency.value = GB.APP.midiToHz(ev.midi);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(v.gain, t + 0.005);
+      g.gain.setValueAtTime(v.gain, Math.max(t + 0.005, end - 0.02));
+      g.gain.linearRampToValueAtTime(0, end);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(end + 0.01);
+      live.push(osc);
+      osc.onended = function () { var i = live.indexOf(osc); if (i >= 0) live.splice(i, 1); };
+    }
+
+    function tick() {
+      if (!ctx || mode !== 'play') return;
+      try {
+        var until = ctx.currentTime - origin + LOOKAHEAD;
+        if (until <= cursor) return;
+        var evs = seq.eventsBetween(cursor, until);
+        cursor = until;
+        if (muted) return; // time moves on; no notes while off
+        for (var i = 0; i < evs.length; i++) playNote(evs[i]);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function stopAll() {
+      for (var i = 0; i < live.length; i++) { try { live[i].stop(); } catch (e) { /* already stopped */ } }
+      live = [];
+    }
+
+    // Moves to the wanted mode: 'play', 'pause' or 'stop'.
+    function setMode(next) {
+      if (next === mode) return;
+      var prev = mode;
+      mode = next;
+      if (!ctx) return;
+      try {
+        if (next === 'play') {
+          if (prev === 'stop') { origin = ctx.currentTime + 0.05; cursor = 0; }
+          if (ctx.state === 'suspended') ctx.resume();
+          if (!timer) timer = setInterval(tick, TICK_MS);
+          tick();
+        } else if (next === 'pause') {
+          ctx.suspend();
+        } else {
+          stopAll();
+          cursor = 0;
+          if (ctx.state === 'suspended') ctx.resume();
+        }
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function setMuted(m) {
+      if (m === muted) return;
+      muted = m;
+      if (!ctx) return;
+      try {
+        master.gain.value = m ? 0 : 1;
+        if (m) stopAll();
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // First key press: create the context, then apply the current mode.
+    function unlock() {
+      if (ctx || failed) return;
+      init();
+      if (!ctx) return;
+      var want = mode;
+      mode = 'stop';
+      setMode(want);
+    }
+
+    return { unlock: unlock, setMode: setMode, setMuted: setMuted };
+  }
+
+  return {
+    createScreen: createScreen, fitDevice: fitDevice, createLegend: createLegend,
+    startLoop: startLoop, bindInput: bindInput, createAudio: createAudio
+  };
+})();
+
+/* ===== BOOT ===== */
+(function () {
+  'use strict';
+  var canvas = document.getElementById('screen');
+  var notice = document.getElementById('notice');
+  var screen = PLATFORM.createScreen(canvas);
+  PLATFORM.fitDevice(document.getElementById('stage'), document.getElementById('device'), canvas, screen);
+  var legend = PLATFORM.createLegend(document.getElementById('legend-items'));
+
+  var store = GB.APP.createStore(function () { return window.localStorage; });
+  var app = GB.APP.createApp({ rng: Math.random, store: store });
+  var input = GB.APP.createInput(function () { return app.bindings; });
+  var audio = PLATFORM.createAudio(GB.DATA.SONG);
+  window.addEventListener('keydown', function () { audio.unlock(); }, true);
+  var ticker = PLATFORM.startLoop({
+    step: function () {
+      app.step(input.frame());
+      audio.setMuted(!app.musicOn);
+      audio.setMode(app.musicMode());
+    },
+    render: function (fb) {
+      app.render(fb);
+      notice.hidden = store.ok;
+      legend(GB.APP.legendItems(app.bindings, app.musicOn));
+    }
+  }, screen);
+  PLATFORM.bindInput(input, function () {
+    input.clear();
+    app.pause();
+  }, function () { ticker.reset(); });
+  // Read-only handle for end-to-end tests.
+  window.gbApp = app;
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "gameboy-tetris-1989",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Single-file offline Game Boy Tetris (1989, A-Type) clone. Dev tooling only; nothing here ships in the HTML.",
+  "scripts": {
+    "test": "node --test \"tests/unit/*.test.mjs\"",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}
