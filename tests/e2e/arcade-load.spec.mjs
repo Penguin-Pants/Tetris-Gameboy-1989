@@ -26,8 +26,7 @@ for (const file of ['pong.html', 'space-invaders.html']) {
   }
 }
 
-// Space Invaders gets its audio in Phase 8; it joins this test then.
-for (const file of ['pong.html']) {
+for (const file of ['pong.html', 'space-invaders.html']) {
   test(`S5: ${file} resumes an audio context that starts suspended`, async ({ page }) => {
     await openArcade(page, file, { initScript: audioStub, initArg: 'suspended' });
     await page.keyboard.press('KeyM');
