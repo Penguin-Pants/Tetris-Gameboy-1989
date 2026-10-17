@@ -95,7 +95,7 @@ Source: `https://computerarcheology.com/Arcade/SpaceInvaders/Code.html` (C), `RA
 **Shots and saucer**
 
 - **Alien shots.** −4 Yr per move, −5 when fewer than 9 aliens (`SpeedShots` 08D8). The three shots take turns through `shotSync` (0476, 04BC, 0683). Plunger columns 1D00-1D0F `01 07 01 01 01 04 0B 01 06 03 01 01 0B 09 02 08`. Squiggly columns 1D06-1D14 `0B 01 06 03 01 01 0B 09 02 08 02 0B 04 07 0A`. Rolling aims at the column over player Xr+8 (061B). Shots fire from the lowest live alien in the column (062F). Reload by score MSB (the BCD hundreds byte, so 0x02 covers scores 200 to 299): table value ≥ MSB selects the entry (`JP NC` at 171E). ≤0x02 → 0x30, ≤0x10 → 0x10, ≤0x20 → 0x0B, ≤0x30 → 0x08, else 0x07 (170E, tables 1CB8 and 1AA1). So the last score of each bracket is 299, 1,099, 2,099 and 3,099. Plunger is off with 1 alien left (04FC).
-- **Saucer.** `tillSaucer` 0x0600 ticks, counts only while reference Yr < 0x78 (0913). Needs ≥ 8 aliens and no squiggly shot (06A1, 0691). Direction from `shotCountLSB` bit 0 (0462). Yr 0xD0. Score table 1D54 in BCD. Pointer moves at the end of every player-shot blow-up (`EndOfBlowup` 0447), wraps after 15 entries (044C). The saucer task runs only when `shotSync` = 2 (0683), so the score read at show-hit 0x18 (070C) comes about 24 frames after the hit. The hitting shot's 16-frame blow-up has ended by then, so the hitting shot is counted: hit with shot N (1-based) scores entry N mod 15. Shot 8 and shot 23 score 300. The 15 values equal I7. Reset per rack (09FD).
+- **Saucer.** `tillSaucer` starts at 0x0600. `TimeToSaucer` (0913) returns early while reference Yr ≥ 0x78. Otherwise it tests the counter for zero (091C) before it decrements (0929), so the first saucer is flagged on eligible call 0x601 (1,537) and later ones every 0x600 calls. Needs ≥ 8 aliens and no squiggly shot (06A1, 0691). Direction from `shotCountLSB` bit 0 (0462). Yr 0xD0. Score table 1D54 in BCD. Pointer moves at the end of every player-shot blow-up (`EndOfBlowup` 0447), wraps after 15 entries (044C). The saucer task runs only when `shotSync` = 2 (0683), so the score read at show-hit 0x18 (070C) comes about 24 frames after the hit. The hitting shot's 16-frame blow-up has ended by then, so the hitting shot is counted: hit with shot N (1-based) scores entry N mod 15. Shot 8 and shot 23 score 300. The 15 values equal I7. Reset per rack (09FD).
 
 **Shields, waves and end rules**
 
@@ -250,6 +250,7 @@ S1, S4, S6, S7, S8, S10, S12 (footer shell), S13, E1, E2, E3, E6, E7
 **Tests**
 Shared suite (`tests/unit/arcade-common.test.mjs` runs each test once per file, `pong.html` and `space-invaders.html`):
 
+- Unit: ticker returns 0 on the first call, the right step count for a normal advance, keeps the remainder, and caps at 5 steps with the backlog dropped (copy of the Tetris ticker, now tested per arcade file).
 - Unit: input ignores repeat and modifier combos, tracks edges, `clear()` empties held keys (S4, E6).
 - Unit: store with a throwing backend, a backend that throws on `setItem` and corrupt JSON. Game values fall back, `ok` is false (S10, E1). For each error path, a save then a load in the same session returns the saved value.
 - Unit: qualification matrix: 0 never qualifies, fewer than 10 entries qualifies, must beat the 10th, ties rank below older (S8, E3).
@@ -259,6 +260,7 @@ Validation and load:
 
 - Unit: validators reject names that are not 3 letters A to Z, non-integer scores and scores above the max.
 - Unit: well-formed JSON with one invalid score entry or a non-boolean sound value: `store.load` returns the default and `ok` becomes false (S10, decision 14).
+- Unit: after any failure (throw or corrupt data), a backend spy records no further `getItem` or `setItem` call in the same session (decision 14).
 - E2E: each file loads with no console output and zero network requests (S1). Body has no scrollbars at 800×600 and 1920×1080.
 
 **Acceptance criteria**
@@ -409,6 +411,7 @@ Unit:
 
 Flow:
 
+- E2E: after the 11th point the `final` screen still shows just before 3 s and moves on at 3 s (PF3).
 - E2E: scripted win (CPU stubbed to miss) goes to name entry, Up and Down change letters, Enter 3 times saves, title shows the row, survives reload (PK2, S6, S9).
 - E2E: scripted loss returns to title with no name entry (PH2).
 - E2E: with a full Top 10 whose 10th margin is 5, a 3-point win returns to the title with no name entry and the list unchanged (S8, PF3).
@@ -496,7 +499,7 @@ Alien shots:
 
 Saucer:
 
-- Saucer appears after 0x600 ticks only with ≥ 8 aliens and no squiggly shot. Direction follows shot count parity (I7).
+- No saucer through eligible `TimeToSaucer` call 1,536. Flagged on call 1,537, then every 1,536 calls. No counting while reference Yr ≥ 0x78. Appears only with ≥ 8 aliens and no squiggly shot. Direction follows shot count parity (I7).
 - Saucer hit with shot N (1-based, the hitting shot counted) scores table entry N mod 15 of `100 50 50 100 150 100 100 50 300 100 100 100 50 150 100`. Check N = 1 (50), 8 (300), 15 (100), 23 (300) (I7, 2.3 Saucer).
 
 **Acceptance criteria**
@@ -560,6 +563,7 @@ IF1, IF2, IF3, IK3, S6, S7, S8, S9, S10, S14, E1, E2, E3
 Flow:
 
 - Unit: attract loop cycles 3 screens on the timer. Enter starts from any of them (IF1, IF2).
+- Unit: PRESS ENTER is drawn in some attract frames and not in others within one blink period, on every attract screen (IF1).
 - E2E: scripted game over (rules hook to end the game) shows the banner for 3 s, then name entry with Left and Right letter changes, saves, attract Top 10 shows it, HUD HI-SCORE shows it after reload (IF3, IK3, S6, S9, I11).
 - E2E: score 0 skips name entry (E3).
 - E2E: with a full Top 10 whose 10th score is 500, a game over at 300 returns to the attract loop with no name entry and the list unchanged (S8, IF3).
@@ -745,6 +749,12 @@ Phases 5 and 9.
 - Corrupt but well-formed saved data now counts as a storage failure (decision 14).
 - `REF`, `NOVICE` and the match runner moved to the test file (decision 13).
 - Remaining long lists grouped.
+
+**PR review round 3 (Codex on d2b4263, CodeRabbit nit)**
+
+- Saucer timer: the ROM tests for zero before it decrements, so the first saucer comes on call 1,537. Test fixed.
+- Added tests: ticker per arcade file, PRESS ENTER blink, Pong 3 s final-screen hold, backend spy after a failure.
+- Rejected: regrouping lists in `docs/arcade-requirements.md`. It is the owner's document, copied as is.
 
 ---
 
