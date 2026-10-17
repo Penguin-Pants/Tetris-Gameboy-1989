@@ -267,5 +267,9 @@ test('Replay: 3 scripted games give fixed scores and screen hashes', () => {
     return [g.score, hash(g.vram), g.frame];
   });
   assert.deepEqual(again, results, 'deterministic');
+  // Golden [score, screen hash, frame] values from the reviewed engine.
+  // Change them only for an intended rules change.
+  const GOLDEN = [[300, 2572643301, 3363], [530, 93572649, 5157], [270, 636582142, 2676]];
+  assert.deepEqual(results, GOLDEN, 'fixed scores and screen hashes');
   for (const [score] of results) assert.ok(score > 0, 'the scripts score points');
 });
