@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<!--
+  Pong (1972 Atari arcade), one player against the CPU. One offline file.
+  Private use only.
+
+  Sections (in order):
+    HEAD/CSS          styles (white on black only)
+    DOM               stage, canvas and footer
+    ARCADE            shared logic (same copy in pong.html and space-invaders.html)
+    CONST             fixed numbers (requirements and sources)
+    RULES             pure game engine
+    DATA              art and text
+    VIEW              pure renderer
+    APP               pure screen state machine
+    ARCADE PLATFORM   shared browser layer (same copy in both games)
+    PLATFORM          drawing for this game
+    BOOT              start-up
+
+  ARCADE to APP sit between the LOGIC markers. They use no DOM, storage or
+  audio. Node tests load that block with tests/helpers/load-arcade.mjs.
+
+  Tests:
+    npm test           unit tests (node:test, no packages)
+    npm run test:e2e   Playwright end-to-end tests (dev only)
+
+  Plan: docs/arcade-build-plan.md. Requirements: docs/arcade-requirements.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PONG</title>
+<style>
+/* ===== HEAD/CSS ===== */
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff; }
+body { display: flex; flex-direction: column; font-family: "Courier New", Courier, monospace; }
+#stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+#screen { display: block; background: #000; image-rendering: pixelated; image-rendering: crisp-edges; }
+#footer {
+  flex: none; display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+  gap: 2px 16px; padding: 6px 10px; border-top: 1px solid #fff; background: #000; font-size: 13px; line-height: 1.35;
+}
+#footer kbd { font-family: inherit; font-weight: 700; }
+#footer .item, #sound { white-space: nowrap; }
+#notice { margin: 0; font-weight: 700; white-space: nowrap; }
+#notice[hidden] { display: none; }
+</style>
+</head>
+<body>
+<!-- ===== DOM ===== -->
+<main id="stage"><canvas id="screen" width="4" height="3" aria-label="Pong game screen"></canvas></main>
+<footer id="footer"><span id="keys"></span><span id="sound"></span><p id="notice" hidden>Scores not saved</p></footer>
+
+<script>
+/* ==BEGIN LOGIC== */
+/* ===== ARCADE ===== */
+// Shared logic. pong.html and space-invaders.html hold the same copy of this
+// section. tests/unit/arcade-common.test.mjs runs one suite against each file.
+var ARCADE = (function () {
+  'use strict';
+
+  function has(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+  // Fixed-timestep accumulator (copy of the Tetris ticker). advance(nowMs)
+  // returns how many game frames to run. Catch-up is capped; when the cap is
+  // hit (for example after a tab restore) the rest of the backlog is dropped.
+  function createTicker(fps, maxSteps) {
+    var stepMs = 1000 / fps;
+    var cap = maxSteps || 5;
+    var acc = 0, last = null;
+    return {
+      advance: function (now) {
+        if (last === null) { last = now; return 0; }
+        var dt = Math.max(0, now - last);
+        last = now;
+        acc += dt;
+        var n = Math.floor(acc / stepMs);
+        if (n > cap) { n = cap; acc = 0; } else { acc -= n * stepMs; }
+        return n;
+      },
+      reset: function () { acc = 0; last = null; }
+    };
+  }
+
+  // ---- Input. keyMap maps KeyboardEvent.code to an action name; several
+  // codes may share an action. OS key repeat is ignored. Ctrl, Alt and Meta
+  // combinations are ignored (requirements S4).
+  function createInput(keyMap) {
+    var codes = Object.keys(keyMap);
+    var actions = [];
+    codes.forEach(function (c) { if (actions.indexOf(keyMap[c]) < 0) actions.push(keyMap[c]); });
+    var down = {};     // code -> true while held
+    var pressed = {};  // code -> true, pressed since the last frame
+
+    // e: { code, repeat, ctrlKey, altKey, metaKey }. Returns true when the
+    // page should call preventDefault.
+    function keyDown(e) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      var known = has(keyMap, e.code);
+      if (e.repeat) return known;
+      down[e.code] = true;
+      pressed[e.code] = true;
+      return known;
+    }
+
+    function keyUp(e) {
+      delete down[e.code];
+      return has(keyMap, e.code);
+    }
+
+    function clear() { down = {}; pressed = {}; }
+
+    // Snapshot for one game frame. A tap that started and ended inside the
+    // frame still counts as held for that frame.
+    function frame() {
+      var held = {}, edge = {};
+      actions.forEach(function (a) { held[a] = false; edge[a] = false; });
+      codes.forEach(function (c) {
+        var a = keyMap[c];
+        if (pressed[c]) edge[a] = true;
+        if (down[c] || pressed[c]) held[a] = true;
+      });
+      pressed = {};
+      return { held: held, pressed: edge };
+    }
+
+    return { keyDown: keyDown, keyUp: keyUp, clear: clear, frame: frame };
+  }
+
+  // ---- Storage adapter. getBackend returns a localStorage-like object and
+  // may throw. Any error after the probe, and any corrupt value (bad JSON or
+  // a validator that returns null), drops the backend for the session: ok
+  // becomes false and later loads and saves use memory only (requirements S10).
+  function createStore(getBackend, prefix) {
+    var store = { ok: true };
+    var memory = {};
+    var backend = null;
+    try {
+      backend = getBackend();
+      var probe = prefix + 'probe';
+      backend.setItem(probe, '1');
+      backend.removeItem(probe);
+    } catch (e) {
+      backend = null;
+      store.ok = false;
+    }
+
+    function fail() { backend = null; store.ok = false; }
+
+    store.load = function (name, validate, fallback) {
+      var raw = null;
+      if (backend) {
+        try { raw = backend.getItem(prefix + name); } catch (e) { fail(); }
+      }
+      if (!backend) raw = has(memory, name) ? memory[name] : null;
+      if (raw === null || raw === undefined) return fallback();
+      var value = null;
+      try { value = validate(JSON.parse(raw)); } catch (e) { value = null; }
+      if (value === null) { fail(); return fallback(); }
+      return value;
+    };
+
+    store.save = function (name, value) {
+      var text = JSON.stringify(value);
+      memory[name] = text;
+      if (!backend) return false;
+      try {
+        backend.setItem(prefix + name, text);
+        return true;
+      } catch (e) {
+        fail();
+        return false;
+      }
+    };
+
+    return store;
+  }
+
+  // ---- Top 10 (requirements S6 to S8). Entry: { name: 3 letters A-Z, score }.
+  var MAX_ENTRIES = 10;
+  var NAME_LEN = 3;
+  var LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+  function validName(n) { return typeof n === 'string' && /^[A-Z]{3}$/.test(n); }
+
+  function validScore(v, maxScore) {
+    return typeof v === 'number' && Math.floor(v) === v && v >= 1 && v <= maxScore;
+  }
+
+  // Returns a clean copy, or null when anything is invalid: not an array,
+  // more than 10 entries, a bad entry or an order that is not highest first.
+  function validateScores(raw, maxScore) {
+    if (!Array.isArray(raw) || raw.length > MAX_ENTRIES) return null;
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var e = raw[i];
+      if (!e || typeof e !== 'object' || !validName(e.name) || !validScore(e.score, maxScore)) return null;
+      if (i > 0 && e.score > out[i - 1].score) return null;
+      out.push({ name: e.name, score: e.score });
+    }
+    return out;
+  }
+
+  // Above 0, and fewer than 10 entries or above the 10th (S8).
+  function qualifies(list, score) {
+    if (!(score > 0)) return false;
+    return list.length < MAX_ENTRIES || score > list[MAX_ENTRIES - 1].score;
+  }
+
+  // Rank (0-based) a new score takes. Ties rank below older equal scores.
+  function rankOf(list, score) {
+    var i = 0;
+    while (i < list.length && list[i].score >= score) i++;
+    return i;
+  }
+
+  function insertScore(list, entry) {
+    var out = list.slice();
+    var r = rankOf(out, entry.score);
+    out.splice(r, 0, { name: entry.name, score: entry.score });
+    return { list: out.slice(0, MAX_ENTRIES), rank: r };
+  }
+
+  // ---- Name entry (S7). 3 slots, each starts at A. prevAction and
+  // nextAction change the letter (wrapping A to Z and Z to A). Start accepts
+  // the slot; after slot 3 step() returns the name.
+  function createNameEntry(prevAction, nextAction) {
+    var ne = { letters: ['A', 'A', 'A'], slot: 0 };
+
+    function shift(ch, dir) {
+      var i = LETTERS.indexOf(ch);
+      return LETTERS[(i + dir + LETTERS.length) % LETTERS.length];
+    }
+
+    ne.step = function (inp) {
+      var p = inp.pressed;
+      if (p.start) {
+        if (ne.slot === NAME_LEN - 1) return ne.letters.join('');
+        ne.slot++;
+        return null;
+      }
+      if (p[nextAction]) ne.letters[ne.slot] = shift(ne.letters[ne.slot], 1);
+      else if (p[prevAction]) ne.letters[ne.slot] = shift(ne.letters[ne.slot], -1);
+      return null;
+    };
+
+    return ne;
+  }
+
+  // Sound setting: a boolean, else null (corrupt).
+  function validateSound(raw) { return typeof raw === 'boolean' ? raw : null; }
+
+  return {
+    createTicker: createTicker, createInput: createInput, createStore: createStore,
+    MAX_ENTRIES: MAX_ENTRIES, NAME_LEN: NAME_LEN, LETTERS: LETTERS,
+    validName: validName, validateScores: validateScores, qualifies: qualifies,
+    rankOf: rankOf, insertScore: insertScore, createNameEntry: createNameEntry,
+    validateSound: validateSound
+  };
+})();
+
+var PONG = {};
+
+/* ===== CONST ===== */
+/* ===== RULES ===== */
+/* ===== DATA ===== */
+/* ===== VIEW ===== */
+/* ===== APP ===== */
+/* ==END LOGIC== */
+</script>
+<script>
+/* ===== ARCADE PLATFORM ===== */
+// Shared browser layer. pong.html and space-invaders.html hold the same copy
+// of this section: canvas fit, footer, loop, keyboard, blur and audio.
+var ARCADE_PLATFORM = (function () {
+  'use strict';
+
+  // Keeps the canvas at aspect w:h, as large as fits in the stage. The stage
+  // background gives the black margins (requirements S3). onSize gets the
+  // shown size in CSS pixels and the device pixel ratio.
+  function fitCanvas(stage, canvas, w, h, onSize) {
+    function fit() {
+      var k = Math.min(stage.clientWidth / w, stage.clientHeight / h);
+      var cw = Math.max(1, Math.floor(w * k)), ch = Math.max(1, Math.floor(h * k));
+      canvas.style.width = cw + 'px';
+      canvas.style.height = ch + 'px';
+      onSize(cw, ch, window.devicePixelRatio || 1);
+    }
+    fit();
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(stage);
+    window.addEventListener('resize', fit);
+  }
+
+  // Footer (S12): keys, sound state and the storage notice. Rebuilt only
+  // when something changes. keys: [[key, label], ...].
+  function createFooter(keysEl, soundEl, noticeEl) {
+    var last = '';
+    return function update(keys, soundOn, storeOk) {
+      var sig = JSON.stringify([keys, soundOn, storeOk]);
+      if (sig === last) return;
+      last = sig;
+      keysEl.textContent = '';
+      keys.forEach(function (k) {
+        var span = document.createElement('span');
+        span.className = 'item';
+        var kbd = document.createElement('kbd');
+        kbd.textContent = k[0];
+        span.appendChild(kbd);
+        span.appendChild(document.createTextNode(' ' + k[1]));
+        keysEl.appendChild(span);
+      });
+      soundEl.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
+      noticeEl.hidden = storeOk;
+    };
+  }
+
+  // Runs step() at the fixed game rate and render() once per animation frame.
+  function startLoop(fps, step, render) {
+    var ticker = ARCADE.createTicker(fps, 5);
+    function frame(now) {
+      var n = ticker.advance(now);
+      for (var i = 0; i < n; i++) step();
+      render();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    return ticker;
+  }
+
+  // Keyboard, blur and visibility. onAway runs when the page loses focus or
+  // is hidden (S11); onBack runs when it is visible again.
+  function bindInput(input, onAway, onBack) {
+    window.addEventListener('keydown', function (e) {
+      if (input.keyDown(e)) e.preventDefault();
+    });
+    window.addEventListener('keyup', function (e) {
+      if (input.keyUp(e)) e.preventDefault();
+    });
+    window.addEventListener('blur', onAway);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) onAway(); else onBack();
+    });
+  }
+
+  // ---- Audio (S5): synthesized effects only. The AudioContext is made on
+  // the first key press (browsers block autoplay). Any WebAudio failure
+  // leaves the game silent. While muted or paused, no new sound starts.
+  function createAudio() {
+    var ctx = null, master = null, noiseBuf = null;
+    var failed = false, muted = false, paused = false;
+    var loops = {};
+
+    function unlock() {
+      if (ctx || failed) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { failed = true; return; }
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = muted ? 0 : 1;
+        master.connect(ctx.destination);
+        if (paused) ctx.suspend();
+      } catch (e) {
+        failed = true;
+        ctx = null;
+      }
+    }
+
+    function live() { return !!ctx && !failed && !muted && !paused; }
+
+    function envelope(g, t, end, level, decay) {
+      g.gain.setValueAtTime(level, t);
+      if (decay) g.gain.linearRampToValueAtTime(0, end);
+      else g.gain.setValueAtTime(level, end);
+    }
+
+    // A tone at freq Hz for ms milliseconds. opts: type (default square),
+    // gain, endFreq (slide), decay (fade to 0).
+    function tone(freq, ms, opts) {
+      if (!live()) return;
+      opts = opts || {};
+      try {
+        var t = ctx.currentTime, end = t + ms / 1000;
+        var osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = opts.type || 'square';
+        osc.frequency.value = freq;
+        osc.frequency.setValueAtTime(freq, t);
+        if (opts.endFreq) osc.frequency.linearRampToValueAtTime(opts.endFreq, end);
+        envelope(g, t, end, opts.gain || 0.12, opts.decay);
+        osc.connect(g);
+        g.connect(master);
+        osc.start(t);
+        osc.stop(end);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // Filtered white noise for ms milliseconds. opts: gain, filter (low-pass
+    // cut-off in Hz), decay.
+    function noise(ms, opts) {
+      if (!live()) return;
+      opts = opts || {};
+      try {
+        if (!noiseBuf) {
+          noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+          var d = noiseBuf.getChannelData(0);
+          for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+        var t = ctx.currentTime, end = t + ms / 1000;
+        var src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+        src.buffer = noiseBuf;
+        src.loop = true;
+        f.type = 'lowpass';
+        f.frequency.value = opts.filter || 2000;
+        envelope(g, t, end, opts.gain || 0.2, opts.decay !== false);
+        src.connect(f);
+        f.connect(g);
+        g.connect(master);
+        src.start(t);
+        src.stop(end);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // A continuous tone until stopLoop(id). Calling loop again for a live id
+    // does nothing. opts: type, gain, lfoHz and lfoDepth (pitch warble).
+    function loop(id, freq, opts) {
+      if (!live() || loops[id]) return;
+      opts = opts || {};
+      try {
+        var osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = opts.type || 'square';
+        osc.frequency.value = freq;
+        g.gain.value = opts.gain || 0.08;
+        var nodes = [osc];
+        if (opts.lfoHz) {
+          var lfo = ctx.createOscillator(), depth = ctx.createGain();
+          lfo.frequency.value = opts.lfoHz;
+          depth.gain.value = opts.lfoDepth || freq / 4;
+          lfo.connect(depth);
+          depth.connect(osc.frequency);
+          lfo.start();
+          nodes.push(lfo);
+        }
+        osc.connect(g);
+        g.connect(master);
+        osc.start();
+        loops[id] = nodes;
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function stopLoop(id) {
+      var nodes = loops[id];
+      if (!nodes) return;
+      delete loops[id];
+      nodes.forEach(function (n) { try { n.stop(); } catch (e) { /* already stopped */ } });
+    }
+
+    function stopAllLoops() { Object.keys(loops).forEach(stopLoop); }
+
+    function setMuted(m) {
+      if (m === muted) return;
+      muted = m;
+      if (m) stopAllLoops();
+      if (!ctx) return;
+      try { master.gain.value = m ? 0 : 1; } catch (e) { failed = true; }
+    }
+
+    // Pause and hidden tab suspend the context (S11).
+    function setPaused(p) {
+      if (p === paused) return;
+      paused = p;
+      if (p) stopAllLoops();
+      if (!ctx) return;
+      try { if (p) ctx.suspend(); else ctx.resume(); } catch (e) { failed = true; }
+    }
+
+    return {
+      unlock: unlock, tone: tone, noise: noise, loop: loop, stopLoop: stopLoop,
+      setMuted: setMuted, setPaused: setPaused
+    };
+  }
+
+  return {
+    fitCanvas: fitCanvas, createFooter: createFooter, startLoop: startLoop,
+    bindInput: bindInput, createAudio: createAudio
+  };
+})();
+
+/* ===== PLATFORM ===== */
+/* ===== BOOT ===== */
+(function () {
+  'use strict';
+  var canvas = document.getElementById('screen');
+  var ctx = canvas.getContext('2d');
+  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, 4, 3, function () {});
+  var footer = ARCADE_PLATFORM.createFooter(document.getElementById('keys'),
+    document.getElementById('sound'), document.getElementById('notice'));
+  var store = ARCADE.createStore(function () { return window.localStorage; }, 'pong.v1.');
+  var soundOn = store.load('sound', ARCADE.validateSound, function () { return true; });
+  ARCADE_PLATFORM.startLoop(60, function () {}, function () {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    footer([['\u2191 \u2193', 'MOVE'], ['ENTER', 'START/PAUSE'], ['M', 'SOUND']], soundOn, store.ok);
+  });
+})();
+</script>
+</body>
+</html>
