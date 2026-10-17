@@ -68,7 +68,7 @@ Each file plays the original rules in a pure black and white arcade look. Each a
 | I6 | Invaders fire 3 shot types: rolling, plunger and squiggly. The rolling shot targets the column above the player. The other two follow column-order tables. Shot reload rate depends on the score in 5 brackets. All values follow the ROM. |
 | I7 | A mystery ship (UFO) crosses the top at intervals set by the ROM. Its score comes from a 15-entry table selected by the player's shot count: 100, 50, 50, 100, 150, 100, 100, 50, 300, 100, 100, 100, 50, 150, 100. The exact counting rule follows the ROM. |
 | I8 | Four shields protect the player. Shots from both sides erode them. |
-| I9 | A destroyed fleet starts a new wave. The fleet starts lower each wave. Start heights for waves 1 to 8 (rotated-screen coordinates from secondary notes): 112, 128, 144, 152, 160, 160, 160, 160. Later waves stay at 160. |
+| I9 | A destroyed fleet starts a new wave. The fleet starts lower each wave. Start heights for waves 1 to 8 (rotated-screen coordinates from secondary notes): 112, 128, 144, 152, 160, 160, 160, 160. Later waves stay at 160. **Amended 2026-10-17 (owner decision O2 in `docs/arcade-build-plan.md`):** these values came from secondary notes and disagree with the ROM. Use ROM table 1DA3 instead: rack 1 Yr 0x78, racks 2 to 9 Yr `60 50 48 48 48 40 40 40`, then repeat from rack 2. |
 | I10 | The game ends when the player loses the last life or when the invaders reach the bottom. |
 | I11 | HUD: SCORE (4 digits), HI-SCORE (the first Top 10 entry, or 0000 when empty), lives count with ship icons *(default)*. The score caps at 9,999 *(default)*. |
 | I12 | Sound effects: 4-note fleet march (tempo follows fleet speed), player shot, invader hit, player explosion, UFO sound, UFO hit. |
