@@ -44,8 +44,9 @@ export async function colorCensus(page, step = 3) {
 
 // Init script: replaces AudioContext with a recorder. window.__audio holds
 // { created, state, tones: [{ freq, start, stop }], noises, loops }.
-export function audioStub() {
-  const rec = { created: 0, state: 'running', tones: [], noises: [], loops: [] };
+// startState 'suspended' makes a new context start suspended.
+export function audioStub(startState) {
+  const rec = { created: 0, state: startState === 'suspended' ? 'suspended' : 'running', tones: [], noises: [], loops: [] };
   window.__audio = rec;
   const param = (v = 0) => ({
     value: v,

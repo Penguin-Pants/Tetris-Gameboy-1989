@@ -712,8 +712,10 @@ PONG.APP = (function () {
     }
 
     function stepFinal() {
+      if (app.paused) return;
       if (--app.timer > 0) return;
       app.margin = marginOf(app.match);
+      app.paused = false;
       if (ARCADE.qualifies(app.scores, app.margin)) {
         app.nameEntry = ARCADE.createNameEntry('down', 'up');
         app.screen = 'nameEntry';
@@ -750,10 +752,13 @@ PONG.APP = (function () {
       }
     };
 
-    // Blur or hidden tab (S11).
-    app.pause = function () { if (app.screen === 'play') app.paused = true; };
+    // Blur or hidden tab (S11). Play stays paused until Enter (E5); the
+    // final-score hold resumes when the page is back (app.resume).
+    app.pause = function () { if (app.screen === 'play' || app.screen === 'final') app.paused = true; };
 
-    app.audioPaused = function () { return app.screen === 'play' && app.paused; };
+    app.resume = function () { if (app.screen === 'final') app.paused = false; };
+
+    app.audioPaused = function () { return (app.screen === 'play' || app.screen === 'final') && app.paused; };
 
     app.render = function () {
       if (app.screen === 'play') return V.renderMatch(app.match, { label: app.paused ? 'PAUSE' : '' });
@@ -847,7 +852,7 @@ var ARCADE_PLATFORM = (function () {
   }
 
   // Keyboard, blur and visibility. onAway runs when the page loses focus or
-  // is hidden (S11); onBack runs when it is visible again.
+  // is hidden (S11); onBack runs when it has focus and is visible again.
   function bindInput(input, onAway, onBack) {
     window.addEventListener('keydown', function (e) {
       if (input.keyDown(e)) e.preventDefault();
@@ -856,6 +861,7 @@ var ARCADE_PLATFORM = (function () {
       if (input.keyUp(e)) e.preventDefault();
     });
     window.addEventListener('blur', onAway);
+    window.addEventListener('focus', function () { if (!document.hidden) onBack(); });
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) onAway(); else onBack();
     });
@@ -878,7 +884,9 @@ var ARCADE_PLATFORM = (function () {
         master = ctx.createGain();
         master.gain.value = muted ? 0 : 1;
         master.connect(ctx.destination);
+        // Some browsers start the context suspended.
         if (paused) ctx.suspend();
+        else if (ctx.state === 'suspended') ctx.resume();
       } catch (e) {
         failed = true;
         ctx = null;
@@ -1079,7 +1087,10 @@ var PLATFORM = (function () {
     input.clear();
     app.pause();
     audio.setPaused(app.audioPaused());
-  }, function () { ticker.reset(); });
+  }, function () {
+    ticker.reset();
+    app.resume();
+  });
   // Read-only handle for end-to-end tests.
   window.pongApp = app;
 })();

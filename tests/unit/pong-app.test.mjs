@@ -85,3 +85,17 @@ test('Footer keys follow the screen', () => {
   app.step(frame(['start']));
   assert.equal(app.footerKeys()[0][1], 'MOVE');
 });
+
+test('S11/E4: blur pauses the final-score hold; it resumes when the page is back', () => {
+  const app = A.createApp({ rng: seeded(3), store: null });
+  app.step(frame(['start']));
+  endMatch(app, 11, 3);
+  app.pause();
+  assert.equal(app.audioPaused(), true);
+  for (let i = 0; i < A.FINAL_FRAMES * 2; i++) app.step(idle);
+  assert.equal(app.screen, 'final', 'the hold does not count down while paused');
+  app.resume();
+  assert.equal(app.audioPaused(), false);
+  skipFinal(app);
+  assert.equal(app.screen, 'nameEntry');
+});

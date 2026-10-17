@@ -41,6 +41,7 @@ body { display: flex; flex-direction: column; font-family: "Courier New", Courie
   gap: 2px 16px; padding: 6px 10px; border-top: 1px solid #fff; background: #000; font-size: 13px; line-height: 1.35;
 }
 #footer kbd { font-family: inherit; font-weight: 700; }
+#keys { display: contents; }
 #footer .item, #sound { white-space: nowrap; }
 #notice { margin: 0; font-weight: 700; white-space: nowrap; }
 #notice[hidden] { display: none; }
@@ -291,8 +292,8 @@ var ARCADE_PLATFORM = (function () {
     window.addEventListener('resize', fit);
   }
 
-  // Footer (S12): keys, sound state and the storage notice. Rebuilt only
-  // when something changes. keys: [[key, label], ...].
+  // Footer (S12): keys, the M key with the sound state and the storage
+  // notice. Rebuilt only when something changes. keys: [[key, label], ...].
   function createFooter(keysEl, soundEl, noticeEl) {
     var last = '';
     return function update(keys, soundOn, storeOk) {
@@ -309,7 +310,11 @@ var ARCADE_PLATFORM = (function () {
         span.appendChild(document.createTextNode(' ' + k[1]));
         keysEl.appendChild(span);
       });
-      soundEl.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
+      soundEl.textContent = '';
+      var m = document.createElement('kbd');
+      m.textContent = 'M';
+      soundEl.appendChild(m);
+      soundEl.appendChild(document.createTextNode(' SOUND: ' + (soundOn ? 'ON' : 'OFF')));
       noticeEl.hidden = storeOk;
     };
   }
@@ -328,7 +333,7 @@ var ARCADE_PLATFORM = (function () {
   }
 
   // Keyboard, blur and visibility. onAway runs when the page loses focus or
-  // is hidden (S11); onBack runs when it is visible again.
+  // is hidden (S11); onBack runs when it has focus and is visible again.
   function bindInput(input, onAway, onBack) {
     window.addEventListener('keydown', function (e) {
       if (input.keyDown(e)) e.preventDefault();
@@ -337,6 +342,7 @@ var ARCADE_PLATFORM = (function () {
       if (input.keyUp(e)) e.preventDefault();
     });
     window.addEventListener('blur', onAway);
+    window.addEventListener('focus', function () { if (!document.hidden) onBack(); });
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) onAway(); else onBack();
     });
@@ -359,7 +365,9 @@ var ARCADE_PLATFORM = (function () {
         master = ctx.createGain();
         master.gain.value = muted ? 0 : 1;
         master.connect(ctx.destination);
+        // Some browsers start the context suspended.
         if (paused) ctx.suspend();
+        else if (ctx.state === 'suspended') ctx.resume();
       } catch (e) {
         failed = true;
         ctx = null;
@@ -505,7 +513,7 @@ var ARCADE_PLATFORM = (function () {
   ARCADE_PLATFORM.startLoop(60, function () {}, function () {
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    footer([['\u2190 \u2192', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'START/PAUSE'], ['M', 'SOUND']], soundOn, store.ok);
+    footer([['\u2190 \u2192', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'START/PAUSE']], soundOn, store.ok);
   });
 })();
 </script>
