@@ -84,6 +84,9 @@ test('Footer keys follow the screen', () => {
   assert.equal(app.footerKeys()[0][1], 'LEVEL');
   app.step(frame(['start']));
   assert.equal(app.footerKeys()[0][1], 'MOVE');
+  endMatch(app, 11, 2);
+  assert.equal(app.screen, 'final');
+  assert.deepEqual(app.footerKeys(), [], 'the final score takes no keys');
 });
 
 test('S11/E4: blur pauses the final-score hold; it resumes when the page is back', () => {

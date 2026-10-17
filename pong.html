@@ -780,6 +780,7 @@ PONG.APP = (function () {
       var ud = '\u2191 \u2193';
       if (app.screen === 'title') return [[ud, 'LEVEL'], ['ENTER', 'START']];
       if (app.screen === 'nameEntry') return [[ud, 'LETTER'], ['ENTER', 'NEXT']];
+      if (app.screen === 'final') return [];             // the final score takes no keys
       return [[ud, 'MOVE'], ['ENTER', 'PAUSE']];
     };
 
