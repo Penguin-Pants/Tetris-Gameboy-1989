@@ -303,7 +303,7 @@ Paddle and ball:
 
 Serve and match:
 
-- After a left miss the serve moves left, and the reverse (P6). Serve waits the delay.
+- After a left miss the serve moves left, and the reverse (P6). Serve waits the delay. After a miss at a non-center y with non-zero vertical velocity, the served ball keeps that y and that velocity.
 - Match ends at 11-x, also at 11-10 (P2).
 - Fuzz: 1,000 seeded random matches finish with valid state.
 
@@ -374,7 +374,7 @@ Layout and look:
 Input and audio:
 
 - E2E: Enter pauses and shows PAUSE. Blur and hidden tab pause and suspend audio. Held keys clear (S11, E4, E5, E6).
-- E2E with a stubbed AudioContext: no context before the first key, tones on paddle hit, wall hit and point, none while muted, M state survives reload (S5, P7).
+- E2E with a stubbed AudioContext: no context before the first key, one tone per event with the right frequency and length (paddle hit 491 Hz about 1 frame, wall hit 246 Hz about 16 ms, point 246 Hz about 240 ms), none while muted, M state survives reload (S5, P7).
 - E2E: an OS key-repeat event does not change paddle travel (S4).
 
 **Acceptance criteria**
@@ -495,7 +495,13 @@ Alien shots:
 - Rolling shot picks the column over the player (I6).
 - Reload rate at each bracket edge: 0 and 299 → 0x30, 300 and 1,099 → 0x10, 1,100 and 2,099 → 0x0B, 2,100 and 3,099 → 0x08, 3,100 → 0x07 (I6, 2.3 reload).
 - Alien shot speed −4, then −5 below 9 aliens. Measured speed is about 80 px/s.
-- Shot hits on player start the explosion and remove a life.
+
+Shot effects:
+
+- Over a seeded run, the `shotSync` cycle fires rolling, plunger and squiggly shots in turn, in the ROM order (I6).
+- An alien shot that hits a shield clears shield pixels and ends that shot (I8).
+- A hit on the player starts the explosion and removes a life.
+- A non-final hit: the explosion ends after 12 × 5 ticks, the cannon respawns when the player task timer (0x80 ticks, mirror 2011) runs out, alien fire resumes after 0x30 more player runs and play continues. Confirm in C (028E, 02A1) whether the two timers run in sequence or overlap, and assert that order (2.3 Player).
 
 Saucer:
 
@@ -754,6 +760,10 @@ Phases 5 and 9.
 
 - Saucer timer: the ROM tests for zero before it decrements, so the first saucer comes on call 1,537. Test fixed.
 - Added tests: ticker per arcade file, PRESS ENTER blink, Pong 3 s final-screen hold, backend spy after a failure.
+
+**PR review round 4 (Codex on d85137a)**
+
+- Added tests: Pong serve keeps the ball's y and vertical velocity, per-event Pong tone frequency and length, the three-shot `shotSync` cycle, alien-shot shield erosion, recovery after a non-final player hit.
 - Rejected: regrouping lists in `docs/arcade-requirements.md`. It is the owner's document, copied as is.
 
 ---
