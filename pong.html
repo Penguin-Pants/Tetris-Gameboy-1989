@@ -41,6 +41,7 @@ body { display: flex; flex-direction: column; font-family: "Courier New", Courie
   gap: 2px 16px; padding: 6px 10px; border-top: 1px solid #fff; background: #000; font-size: 13px; line-height: 1.35;
 }
 #footer kbd { font-family: inherit; font-weight: 700; }
+#keys { display: contents; }
 #footer .item, #sound { white-space: nowrap; }
 #notice { margin: 0; font-weight: 700; white-space: nowrap; }
 #notice[hidden] { display: none; }
@@ -424,7 +425,112 @@ PONG.RULES = (function () {
 })();
 
 /* ===== DATA ===== */
+PONG.DATA = (function () {
+  'use strict';
+  // 5 x 7 block font. Each glyph is 7 rows, top first; bit 4 is the left
+  // column. Drawn as rectangles, so it stays pure white on black.
+  var FONT = {
+    A: [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11], B: [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+    C: [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E], D: [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+    E: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F], F: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+    G: [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F], H: [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+    I: [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E], J: [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+    K: [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11], L: [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+    M: [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11], N: [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
+    O: [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E], P: [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+    Q: [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D], R: [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+    S: [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E], T: [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+    U: [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E], V: [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+    W: [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A], X: [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+    Y: [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04], Z: [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+    '0': [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], '1': [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+    '2': [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], '3': [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
+    '4': [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02], '5': [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+    '6': [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E], '7': [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+    '8': [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], '9': [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+    '-': [0, 0, 0, 0x1F, 0, 0, 0], '.': [0, 0, 0, 0, 0, 0x0C, 0x0C],
+    ':': [0, 0x0C, 0x0C, 0, 0x0C, 0x0C, 0], '>': [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+    ' ': [0, 0, 0, 0, 0, 0, 0]
+  };
+
+  // Score digit segments in a 16 x 32 cell with 4-unit strokes (2.4 Score
+  // digits): [x, y, w, h] per segment a to g.
+  var SEGMENTS = {
+    a: [0, 0, 16, 4], b: [12, 0, 4, 16], c: [12, 16, 4, 16], d: [0, 28, 16, 4],
+    e: [0, 16, 4, 16], f: [0, 0, 4, 16], g: [0, 14, 16, 4]
+  };
+  var DIGIT_SEGMENTS = ['abcdef', 'bc', 'abged', 'abgcd', 'fgbc', 'afgcd', 'afgedc', 'abc', 'abcdefg', 'abcfgd'];
+
+  return { FONT: FONT, SEGMENTS: SEGMENTS, DIGIT_SEGMENTS: DIGIT_SEGMENTS };
+})();
+
 /* ===== VIEW ===== */
+// Pure renderer. Every function returns or extends a list of rectangles
+// [x, y, w, h] in native units, white on a black field. An optional fifth
+// value 0 draws the rectangle black.
+PONG.VIEW = (function () {
+  'use strict';
+  var C = PONG.CONST, D = PONG.DATA, R = PONG.RULES;
+  var GLYPH_W = 6;  // 5 columns and 1 space, in font pixels
+
+  // Draws str with font pixels of size px units; returns the list.
+  function text(out, str, x, y, px) {
+    for (var i = 0; i < str.length; i++) {
+      var g = D.FONT[str[i]] || D.FONT[' '];
+      for (var row = 0; row < 7; row++) {
+        for (var col = 0; col < 5; col++) {
+          if (g[row] & (0x10 >> col)) out.push([x + (i * GLYPH_W + col) * px, y + row * px, px, px]);
+        }
+      }
+    }
+    return out;
+  }
+
+  function textWidth(str, px) { return (str.length * GLYPH_W - 1) * px; }
+
+  function centered(out, str, y, px) {
+    return text(out, str, Math.round((C.W - textWidth(str, px)) / 2), y, px);
+  }
+
+  function digit(out, n, x, y) {
+    var segs = D.DIGIT_SEGMENTS[n];
+    for (var i = 0; i < segs.length; i++) {
+      var s = D.SEGMENTS[segs[i]];
+      out.push([x + s[0], y + s[1], s[2], s[3]]);
+    }
+  }
+
+  // Score in a 64-unit window: two 32-unit cells, digit in the right half
+  // of each cell. The leading zero is blank (M, Ho p61).
+  function score(out, n, windowX) {
+    if (n >= 10) digit(out, Math.floor(n / 10) % 10, windowX + 16, 16);
+    digit(out, n % 10, windowX + 48, 16);
+  }
+
+  function net(out) {
+    for (var y = 0; y < C.H; y += C.NET_DASH * 2) out.push([C.NET_X, y, 1, Math.min(C.NET_DASH, C.H - y)]);
+  }
+
+  // The play field. opts.label: text drawn in the middle (PAUSE).
+  function renderMatch(m, opts) {
+    var out = [];
+    net(out);
+    score(out, m.score.left, 48);
+    score(out, m.score.right, 240);
+    out.push([C.LEFT_X, m.paddles.left, C.PADDLE_W, C.PADDLE_H]);
+    out.push([C.RIGHT_X, m.paddles.right, C.PADDLE_W, C.PADDLE_H]);
+    if (R.ballVisible(m)) out.push([m.ball.x, m.ball.y, C.BALL, C.BALL]);
+    if (opts && opts.label) {
+      var w = textWidth(opts.label, 3);
+      // A fifth value 0 draws black: a box that clears the field behind the label.
+      out.push([Math.round((C.W - w) / 2) - 6, 108, w + 12, 33, 0]);
+      centered(out, opts.label, 114, 3);
+    }
+    return out;
+  }
+
+  return { text: text, textWidth: textWidth, centered: centered, renderMatch: renderMatch, score: score, net: net };
+})();
 /* ===== APP ===== */
 PONG.APP = (function () {
   'use strict';
@@ -490,9 +596,78 @@ PONG.APP = (function () {
 
   function createCpu(level, rng) { return createTracker(DIFFICULTY[level], rng); }
 
+  // Keyboard paddle speed in lines per frame: about 1 s top to bottom
+  // (assumption R7). The original used a knob.
+  var PLAYER_SPEED = 4;
+
+  // ---- Screen state machine. opts: { rng, store }. store may be null.
+  // After each step, app.sounds lists the sound events of that frame.
+  function createApp(opts) {
+    var store = opts.store;
+    var V = PONG.VIEW;
+    var app = {
+      screen: 'title',
+      soundOn: store ? store.load('sound', ARCADE.validateSound, function () { return true; }) : true,
+      level: 'normal',
+      match: null,
+      cpu: null,
+      paused: false,
+      sounds: [],
+      frame: 0
+    };
+
+    function startMatch() {
+      app.match = R.createMatch();
+      app.cpu = createCpu(app.level, opts.rng);
+      app.paused = false;
+      app.screen = 'play';
+    }
+
+    function stepPlay(inp) {
+      if (inp.pressed.start) app.paused = !app.paused;
+      if (app.paused) return;
+      var h = inp.held;
+      var move = ((h.down ? 1 : 0) - (h.up ? 1 : 0)) * PLAYER_SPEED;
+      var ev = R.step(app.match, { left: move, right: app.cpu.move(playerView(app.match, 'right')) });
+      for (var i = 0; i < ev.length; i++) if (C.SOUND[ev[i].type]) app.sounds.push(ev[i].type);
+      // Temporary flow until Phase 5: back to the title.
+      if (app.match.over) app.screen = 'title';
+    }
+
+    app.step = function (inp) {
+      app.sounds = [];
+      app.frame++;
+      if (inp.pressed.sound) {
+        app.soundOn = !app.soundOn;
+        if (store) store.save('sound', app.soundOn);
+      }
+      if (app.screen === 'title') {
+        if (inp.pressed.start) startMatch();
+      } else if (app.screen === 'play') {
+        stepPlay(inp);
+      }
+    };
+
+    // Blur or hidden tab (S11).
+    app.pause = function () { if (app.screen === 'play') app.paused = true; };
+
+    app.audioPaused = function () { return app.screen === 'play' && app.paused; };
+
+    app.render = function () {
+      if (app.screen === 'play') return V.renderMatch(app.match, { label: app.paused ? 'PAUSE' : '' });
+      return V.centered([], 'PRESS ENTER', 114, 3);
+    };
+
+    app.footerKeys = function () {
+      return [['\u2191 \u2193', 'MOVE'], ['ENTER', 'START/PAUSE']];
+    };
+
+    return app;
+  }
+
   return {
     playerView: playerView, createTracker: createTracker, createCpu: createCpu,
-    DIFFICULTY: DIFFICULTY, LEVELS: LEVELS
+    DIFFICULTY: DIFFICULTY, LEVELS: LEVELS, PLAYER_SPEED: PLAYER_SPEED, createApp: createApp
   };
 })();
 /* ==END LOGIC== */
@@ -520,8 +695,8 @@ var ARCADE_PLATFORM = (function () {
     window.addEventListener('resize', fit);
   }
 
-  // Footer (S12): keys, sound state and the storage notice. Rebuilt only
-  // when something changes. keys: [[key, label], ...].
+  // Footer (S12): keys, the M key with the sound state and the storage
+  // notice. Rebuilt only when something changes. keys: [[key, label], ...].
   function createFooter(keysEl, soundEl, noticeEl) {
     var last = '';
     return function update(keys, soundOn, storeOk) {
@@ -538,7 +713,11 @@ var ARCADE_PLATFORM = (function () {
         span.appendChild(document.createTextNode(' ' + k[1]));
         keysEl.appendChild(span);
       });
-      soundEl.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
+      soundEl.textContent = '';
+      var m = document.createElement('kbd');
+      m.textContent = 'M';
+      soundEl.appendChild(m);
+      soundEl.appendChild(document.createTextNode(' SOUND: ' + (soundOn ? 'ON' : 'OFF')));
       noticeEl.hidden = storeOk;
     };
   }
@@ -721,21 +900,77 @@ var ARCADE_PLATFORM = (function () {
 })();
 
 /* ===== PLATFORM ===== */
+var PLATFORM = (function () {
+  'use strict';
+  var C = PONG.CONST;
+
+  // Maps native units to device pixels. Every edge is rounded to a whole
+  // pixel and nothing is smoothed, so only pure black and white pixels
+  // exist (S2, S3).
+  function createScreen(canvas) {
+    var ctx = canvas.getContext('2d');
+
+    function resize(cssW, cssH, dpr) {
+      var w = Math.max(1, Math.round(cssW * dpr)), h = Math.max(1, Math.round(cssH * dpr));
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    }
+
+    function draw(rects) {
+      var sx = canvas.width / C.W, sy = canvas.height / C.H;
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (var i = 0; i < rects.length; i++) {
+        var r = rects[i];
+        var x0 = Math.round(r[0] * sx), y0 = Math.round(r[1] * sy);
+        var x1 = Math.max(x0 + 1, Math.round((r[0] + r[2]) * sx));
+        var y1 = Math.max(y0 + 1, Math.round((r[1] + r[3]) * sy));
+        ctx.fillStyle = r[4] === 0 ? '#000' : '#fff';
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+
+    return { resize: resize, draw: draw };
+  }
+
+  return { createScreen: createScreen };
+})();
+
 /* ===== BOOT ===== */
 (function () {
   'use strict';
+  var C = PONG.CONST;
   var canvas = document.getElementById('screen');
-  var ctx = canvas.getContext('2d');
-  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, 4, 3, function () {});
+  var screen = PLATFORM.createScreen(canvas);
+  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, 4, 3, screen.resize);
   var footer = ARCADE_PLATFORM.createFooter(document.getElementById('keys'),
     document.getElementById('sound'), document.getElementById('notice'));
   var store = ARCADE.createStore(function () { return window.localStorage; }, 'pong.v1.');
-  var soundOn = store.load('sound', ARCADE.validateSound, function () { return true; });
-  ARCADE_PLATFORM.startLoop(60, function () {}, function () {
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    footer([['\u2191 \u2193', 'MOVE'], ['ENTER', 'START/PAUSE'], ['M', 'SOUND']], soundOn, store.ok);
+  var app = PONG.APP.createApp({ rng: Math.random, store: store });
+  var input = ARCADE.createInput({
+    ArrowUp: 'up', ArrowDown: 'down', Enter: 'start', NumpadEnter: 'start', KeyM: 'sound'
   });
+  var audio = ARCADE_PLATFORM.createAudio();
+  window.addEventListener('keydown', function () { audio.unlock(); }, true);
+  var ticker = ARCADE_PLATFORM.startLoop(C.FPS, function () {
+    app.step(input.frame());
+    audio.setMuted(!app.soundOn);
+    audio.setPaused(app.audioPaused());
+    for (var i = 0; i < app.sounds.length; i++) {
+      var s = C.SOUND[app.sounds[i]];
+      audio.tone(s.freq, s.ms);
+    }
+  }, function () {
+    screen.draw(app.render());
+    footer(app.footerKeys(), app.soundOn, store.ok);
+  });
+  ARCADE_PLATFORM.bindInput(input, function () {
+    input.clear();
+    app.pause();
+    audio.setPaused(app.audioPaused());
+  }, function () { ticker.reset(); });
+  // Read-only handle for end-to-end tests.
+  window.pongApp = app;
 })();
 </script>
 </body>
