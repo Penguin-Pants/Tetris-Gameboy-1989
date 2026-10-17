@@ -126,5 +126,6 @@ test('S11/E4: blur pauses the game-over banner; it resumes when the page is back
 test('S12: the footer keys follow the screen', () => {
   assert.equal(A.footerKeys('attract')[0][1], 'START');
   assert.equal(A.footerKeys('play')[0][1], 'MOVE');
+  assert.deepEqual(A.footerKeys('gameOver'), [], 'the game-over banner takes no keys');
   assert.deepEqual(A.footerKeys('nameEntry').map((k) => k[1]), ['LETTER', 'NEXT']);
 });

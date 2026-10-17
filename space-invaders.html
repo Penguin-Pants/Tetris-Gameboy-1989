@@ -1626,6 +1626,7 @@ SI.APP = (function () {
   function footerKeys(screen) {
     if (screen === 'nameEntry') return [['\u2190 \u2192', 'LETTER'], ['ENTER', 'NEXT']];
     if (screen === 'attract') return [['ENTER', 'START']];
+    if (screen === 'gameOver') return [];             // the banner takes no keys
     return [['\u2190 \u2192', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'PAUSE']];
   }
   var PAGE_FRAMES = 7 * C.FPS;        // IF1 (default): each attract screen about 7 s
