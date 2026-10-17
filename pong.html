@@ -262,7 +262,167 @@ var ARCADE = (function () {
 var PONG = {};
 
 /* ===== CONST ===== */
+// Native circuit units: x is one clock of the 7.159 MHz dot clock, y is one
+// scan line. Sources (docs/arcade-build-plan.md part 2.4):
+//   E  = Edwards, "Reconstructing Pong on an FPGA" (Columbia, 2012)
+//   Ho = Holden, pong-story.com/LAWN_TENNIS.pdf
+//   M  = MAME src/mame/atari/nl_pong.cpp
+PONG.CONST = (function () {
+  'use strict';
+  return {
+    // 455 clocks x 262 lines at 7.159 MHz = 60.05 Hz (E 1.1 to 1.3).
+    FPS: 7159090 / 455 / 262,
+    // Visible area H 80-454 by lines 16-261 (E 1.4, 1.9): x = H - 80, y = line - 16.
+    W: 375,
+    H: 246,
+    // Paddles 4 wide at H 128 and H 384 (E 1.6). Height 16 gives 8 equal
+    // 2-line segments (plan decision 9).
+    PADDLE_W: 4,
+    PADDLE_H: 16,
+    LEFT_X: 48,
+    RIGHT_X: 304,
+    // The paddle top cannot reach the top strip (P5). No source gives the
+    // line count; unverified assumption (plan decision 11).
+    PADDLE_MIN_Y: 16,
+    // Ball 4 x 4 (E 1.8, Ho p37).
+    BALL: 4,
+    // Horizontal units per frame for under 4 hits, 4 to 11 hits and 12 or
+    // more (Ho p50-51, M). The hit counter stops at 12 (E 1.8).
+    SPEEDS: [2, 3, 4],
+    HITS_FAST: 4,
+    HITS_FASTEST: 12,
+    // Vertical lines per frame by paddle segment, top to bottom. Negative is
+    // up. Seven values (E Fig. 11, F vbc).
+    SEGMENT_VY: [-3, -2, -1, 0, 0, 1, 2, 3],
+    // Serve about 1.7 s after a point (E 1.12), from H 262 (F serve).
+    SERVE_FRAMES: 102,
+    SERVE_X: 182,
+    // First serve of a match (assumption R6): toward the player, vy +1.
+    FIRST_VY: 1,
+    WIN_SCORE: 11,
+    // Net at H 256, 4 lines on and 4 off (E 1.5).
+    NET_X: 176,
+    NET_DASH: 4,
+    // Sounds (Ho p67, E 1.11): paddle 491 Hz about 1 frame, wall 246 Hz
+    // about 16 ms, point 246 Hz about 240 ms.
+    SOUND: {
+      paddleHit: { freq: 491, ms: 17 },
+      wallHit: { freq: 246, ms: 16 },
+      point: { freq: 246, ms: 240 }
+    }
+  };
+})();
+
 /* ===== RULES ===== */
+// Pure match engine. step() runs one 60.05 Hz frame and returns events.
+PONG.RULES = (function () {
+  'use strict';
+  var C = PONG.CONST;
+  var PADDLE_MAX_Y = C.H - C.PADDLE_H;
+  var BALL_MAX_Y = C.H - C.BALL;
+
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  function speedFor(hits) {
+    if (hits >= C.HITS_FASTEST) return C.SPEEDS[2];
+    if (hits >= C.HITS_FAST) return C.SPEEDS[1];
+    return C.SPEEDS[0];
+  }
+
+  // Ball: x, y (top-left), dir (+1 right, -1 left), vy. While serveTimer > 0
+  // the ball is hidden and waits.
+  function createMatch() {
+    var mid = (C.H - C.PADDLE_H) >> 1;
+    return {
+      ball: { x: C.SERVE_X, y: (C.H - C.BALL) >> 1, dir: -1, vy: C.FIRST_VY },
+      paddles: { left: mid, right: mid },
+      score: { left: 0, right: 0 },
+      hits: 0,
+      serveTimer: C.SERVE_FRAMES,
+      over: false,
+      winner: null,
+      frame: 0
+    };
+  }
+
+  // Segment 0..7 of the paddle at the ball's center line.
+  function segmentAt(paddleY, ballY) {
+    return clamp((ballY + (C.BALL >> 1) - paddleY) >> 1, 0, 7);
+  }
+
+  function overlaps(paddleX, paddleY, b) {
+    return b.x < paddleX + C.PADDLE_W && b.x + C.BALL > paddleX &&
+      b.y < paddleY + C.PADDLE_H && b.y + C.BALL > paddleY;
+  }
+
+  // input: { left, right }, each a paddle move in lines this frame (+ is down).
+  function step(m, input) {
+    var ev = [];
+    m.frame++;
+    m.paddles.left = clamp(m.paddles.left + (input.left | 0), C.PADDLE_MIN_Y, PADDLE_MAX_Y);
+    m.paddles.right = clamp(m.paddles.right + (input.right | 0), C.PADDLE_MIN_Y, PADDLE_MAX_Y);
+    if (m.over) return ev;
+
+    var b = m.ball;
+    if (m.serveTimer > 0) {
+      if (--m.serveTimer === 0) {
+        b.x = C.SERVE_X;
+        ev.push({ type: 'serve', dir: b.dir });
+      }
+      return ev;
+    }
+
+    b.x += b.dir * speedFor(m.hits);
+    b.y += b.vy;
+    if (b.y < 0) {
+      b.y = -b.y;
+      b.vy = -b.vy;
+      ev.push({ type: 'wallHit' });
+    } else if (b.y > BALL_MAX_Y) {
+      b.y = 2 * BALL_MAX_Y - b.y;
+      b.vy = -b.vy;
+      ev.push({ type: 'wallHit' });
+    }
+
+    // A hit sets the direction away from the paddle, so the ball never sticks
+    // in a paddle (E 1.8). Speed 4 and widths 4 + 4 mean an overlap test at
+    // the new position never skips a paddle.
+    var side = b.dir < 0 ? 'left' : 'right';
+    var px = b.dir < 0 ? C.LEFT_X : C.RIGHT_X;
+    if (overlaps(px, m.paddles[side], b)) {
+      b.vy = C.SEGMENT_VY[segmentAt(m.paddles[side], b.y)];
+      b.dir = -b.dir;
+      m.hits = Math.min(m.hits + 1, C.HITS_FASTEST);
+      ev.push({ type: 'paddleHit', side: side });
+      return ev;
+    }
+
+    if (b.x + C.BALL <= 0 || b.x >= C.W) {
+      var scorer = b.x >= C.W ? 'left' : 'right';
+      m.score[scorer]++;
+      m.hits = 0;
+      // Direction, vertical position and velocity stay, so the serve goes
+      // toward the side that missed (P6, Ho p71-72).
+      ev.push({ type: 'point', scorer: scorer });
+      if (m.score[scorer] >= C.WIN_SCORE) {
+        m.over = true;
+        m.winner = scorer;
+        ev.push({ type: 'matchOver', winner: scorer });
+      } else {
+        m.serveTimer = C.SERVE_FRAMES;
+      }
+    }
+    return ev;
+  }
+
+  function ballVisible(m) { return !m.over && m.serveTimer === 0; }
+
+  return {
+    createMatch: createMatch, step: step, speedFor: speedFor,
+    segmentAt: segmentAt, ballVisible: ballVisible, PADDLE_MAX_Y: PADDLE_MAX_Y
+  };
+})();
+
 /* ===== DATA ===== */
 /* ===== VIEW ===== */
 /* ===== APP ===== */
