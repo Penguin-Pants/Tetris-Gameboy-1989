@@ -426,6 +426,75 @@ PONG.RULES = (function () {
 /* ===== DATA ===== */
 /* ===== VIEW ===== */
 /* ===== APP ===== */
+PONG.APP = (function () {
+  'use strict';
+  var C = PONG.CONST, R = PONG.RULES;
+
+  // What a player sees from one side: the ball (when shown), which way it
+  // moves, and the own paddle. No future serve or hidden state (plan Phase 3).
+  function playerView(m, side) {
+    var b = m.ball;
+    return {
+      side: side,
+      ballVisible: R.ballVisible(m),
+      ballY: b.y,
+      ballX: b.x,
+      toward: b.dir === (side === 'right' ? 1 : -1),
+      paddleY: m.paddles[side]
+    };
+  }
+
+  // Controller (plan decision 12): reaction (frames before it reacts to a
+  // ball that turns toward it), speed (lines per frame), error (random aim
+  // offset in lines, drawn once per return) and aim (chance to return the
+  // ball upward). The aim parameter was added in tuning: error alone could
+  // not lift the CPU win rate above about 70%.
+  // move(view) returns the paddle move for this frame.
+  function createTracker(params, rng) {
+    var wasToward = false, wait = 0, offset = 0;
+    var center = (C.H - C.PADDLE_H) >> 1;
+    return {
+      move: function (v) {
+        var toward = v.ballVisible && v.toward;
+        if (toward && !wasToward) {
+          wait = params.reaction;
+          offset = Math.round((rng() * 2 - 1) * params.error);
+          // aim: chance to return the ball upward, toward the top strip
+          // the far paddle cannot reach (P5).
+          if (params.aim && rng() < params.aim) offset = Math.abs(offset);
+        }
+        wasToward = toward;
+        var target;
+        if (toward) {
+          if (wait > 0) { wait--; return 0; }
+          target = v.ballY + (C.BALL >> 1) + offset - (C.PADDLE_H >> 1);
+        } else {
+          target = center;
+        }
+        var d = target - v.paddleY;
+        return d > params.speed ? params.speed : d < -params.speed ? -params.speed : d;
+      }
+    };
+  }
+
+  // CPU levels (PD1: only CPU behavior changes). Tuned in
+  // tests/unit/pong-cpu.test.mjs, 300 seeded matches each. CPU win rate
+  // against the reference bot: easy 20.7%, normal 51.0%, hard 83.7%.
+  // The new-player bot beats easy in 90.7% of matches.
+  var DIFFICULTY = {
+    easy: { reaction: 16, speed: 3, error: 9, aim: 0 },
+    normal: { reaction: 10, speed: 3, error: 8, aim: 0 },
+    hard: { reaction: 4, speed: 4, error: 7, aim: 0.3 }
+  };
+  var LEVELS = ['easy', 'normal', 'hard'];
+
+  function createCpu(level, rng) { return createTracker(DIFFICULTY[level], rng); }
+
+  return {
+    playerView: playerView, createTracker: createTracker, createCpu: createCpu,
+    DIFFICULTY: DIFFICULTY, LEVELS: LEVELS
+  };
+})();
 /* ==END LOGIC== */
 </script>
 <script>
