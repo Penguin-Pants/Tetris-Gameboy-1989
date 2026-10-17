@@ -160,6 +160,20 @@ test('I3: 3 lives; one extra life at 1,500, once', () => {
   assert.equal(g.ships, 3, 'no second extra life');
 });
 
+test('I3: the extra life is awarded even when the same hit clears the rack on the last life', () => {
+  const g = playing();
+  g.aliens.fill(0);
+  g.aliens[0] = 1;
+  g.ships = 0;
+  g.score = 1490;
+  hitAlien(g, 0);
+  assert.equal(g.score, 1500);
+  assert.equal(g.ships, 1, 'the extra ship comes before the empty-rack end');
+  g.playerAlive = 0;
+  runUntil(g, (s, ev) => ev.some((e) => e.type === 'lifeLost' || e.type === 'gameOver'));
+  assert.notEqual(g.phase, 'over', 'the player continues with the extra ship');
+});
+
 test('I10: losing the last life ends the game', () => {
   const g = playing();
   g.ships = 0;
