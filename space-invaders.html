@@ -1817,9 +1817,11 @@ var ARCADE_PLATFORM = (function () {
       if (input.keyUp(e)) e.preventDefault();
     });
     window.addEventListener('blur', onAway);
-    window.addEventListener('focus', function () { if (!document.hidden) onBack(); });
+    // Resume only when the page is both visible and focused.
+    function back() { if (!document.hidden && document.hasFocus()) onBack(); }
+    window.addEventListener('focus', back);
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) onAway(); else onBack();
+      if (document.hidden) onAway(); else back();
     });
   }
 

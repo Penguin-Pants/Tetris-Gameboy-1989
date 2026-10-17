@@ -640,9 +640,9 @@ PONG.APP = (function () {
   }
 
   // CPU levels (PD1: only CPU behavior changes). Tuned in
-  // tests/unit/pong-cpu.test.mjs, 300 seeded matches each. CPU win rate
-  // against the reference bot: easy 20.7%, normal 51.0%, hard 83.7%.
-  // The new-player bot beats easy in 90.7% of matches.
+  // tests/unit/pong-cpu.test.mjs, 300 seeded matches each, one random
+  // stream per side. CPU win rate against the reference bot: easy 12.3%,
+  // normal 53.0%, hard 86.0%. The new-player bot beats easy in 93.0%.
   var DIFFICULTY = {
     easy: { reaction: 16, speed: 3, error: 9, aim: 0 },
     normal: { reaction: 10, speed: 3, error: 8, aim: 0 },
@@ -867,9 +867,11 @@ var ARCADE_PLATFORM = (function () {
       if (input.keyUp(e)) e.preventDefault();
     });
     window.addEventListener('blur', onAway);
-    window.addEventListener('focus', function () { if (!document.hidden) onBack(); });
+    // Resume only when the page is both visible and focused.
+    function back() { if (!document.hidden && document.hasFocus()) onBack(); }
+    window.addEventListener('focus', back);
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) onAway(); else onBack();
+      if (document.hidden) onAway(); else back();
     });
   }
 

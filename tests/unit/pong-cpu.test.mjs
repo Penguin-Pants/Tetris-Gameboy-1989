@@ -13,10 +13,11 @@ const REF = { reaction: 8, speed: 4, error: 4 };
 const NOVICE = { reaction: 14, speed: 3, error: 7 };
 const MATCHES = 300;
 
-// Plays one match: bot params on the left, a controller on the right.
-function play(leftParams, rightController, rng) {
+// Plays one match: bot params on the left (own random stream), a
+// controller on the right.
+function play(leftParams, rightController, leftRng) {
   const m = R.createMatch();
-  const left = A.createTracker(leftParams, rng);
+  const left = A.createTracker(leftParams, leftRng);
   for (let f = 0; !m.over && f < 400000; f++) {
     R.step(m, { left: left.move(A.playerView(m, 'left')), right: rightController.move(A.playerView(m, 'right')) });
   }
@@ -27,8 +28,9 @@ function play(leftParams, rightController, rng) {
 function cpuWinRate(level, opponent, seedBase) {
   let wins = 0;
   for (let i = 0; i < MATCHES; i++) {
-    const rng = seeded(seedBase + i);
-    if (play(opponent, A.createCpu(level, rng), rng) === 'right') wins++;
+    // Independent streams: the CPU level never changes the opponent's draws.
+    const cpu = A.createCpu(level, seeded(seedBase + i));
+    if (play(opponent, cpu, seeded(seedBase + 100000 + i)) === 'right') wins++;
   }
   return wins / MATCHES;
 }

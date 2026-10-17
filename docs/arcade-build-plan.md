@@ -796,11 +796,11 @@ Readiness:
 **Results**
 - `npm test`: 190 pass (109 Tetris). `npm run test:e2e`: all pass, Tetris specs included.
 - No Tetris file changed. No network, `eval` or external resource in either game file.
-- Pong CPU win rate against `REF` (300 seeded matches): Easy 20.7%, Normal 51.0%, Hard 83.7%. `NOVICE` beats Easy in 90.7%.
+- Pong CPU win rate against `REF` (300 seeded matches, one random stream per side): Easy 12.3%, Normal 53.0%, Hard 86.0%. `NOVICE` beats Easy in 93.0%.
 
 **Changes from the plan**
 - Decision 12: the CPU has a fourth parameter, `aim` (chance to return the ball upward). Error alone could not lift the CPU win rate above about 70%.
-- Shared platform: a `focus` listener resumes the Pong final score and the Space Invaders game-over banner after a blur. Play stays paused until Enter (E5).
+- Shared platform: the Pong final score and the Space Invaders game-over banner pause on blur and resume only when the page is both visible and focused. Play stays paused until Enter (E5).
 - Shared platform: `unlock()` resumes an audio context that a browser starts suspended.
 - Shared store: a corrupt saved value is removed before the fallback, so a later session can save again.
 - Footer: the M key shows next to the sound state.

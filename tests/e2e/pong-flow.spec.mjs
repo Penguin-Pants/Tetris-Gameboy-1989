@@ -53,6 +53,24 @@ test.describe('flow', () => {
     expect(dt).toBeLessThan(3600);
   });
 
+  test('S11: the final score stays paused while the page is visible but not focused', async ({ page }) => {
+    await openArcade(page, FILE);
+    await playTo(page, { left: 11, right: 2 });
+    await page.evaluate(() => {
+      window.__focus = true;
+      document.hasFocus = () => window.__focus;
+      window.__focus = false;
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.waitForTimeout(3500);
+    expect(await page.evaluate(() => [pongApp.screen, pongApp.paused])).toEqual(['final', true]);
+    await page.evaluate(() => { window.__focus = true; window.dispatchEvent(new Event('focus')); });
+    await page.waitForFunction(() => pongApp.screen === 'nameEntry', null, { timeout: 6000 });
+  });
+
   test('PK2/S6/S9: a win goes to name entry; Up changes letters; the row shows on the title after reload', async ({ page }) => {
     await openArcade(page, FILE);
     await playTo(page, { left: 11, right: 4 });
