@@ -262,8 +262,1013 @@ var ARCADE = (function () {
 var SI = {};
 
 /* ===== CONST ===== */
-/* ===== RULES ===== */
+// Numbers come from the requirements (docs/arcade-requirements.md, 3.3) or
+// from the ROM disassembly by Mikael Agren (computerarcheology.com,
+// Arcade/SpaceInvaders/Code.html). Hex addresses in comments are ROM
+// addresses. Values stay in ROM units: Xr runs left to right, Yr runs bottom
+// to top, and a pixel number is Xr * 256 + Yr.
+SI.CONST = (function () {
+  'use strict';
+  return {
+    FPS: 60,                    // Video interrupts at lines 96 and 224, 60 Hz (Hardware.html)
+    SCREEN_W: 224,
+    SCREEN_H: 256,
+    STORAGE_PREFIX: 'spaceinvaders.v1.',
+    MAX_SCORE: 9999,            // I11 (default): the score caps
+    START_SHIPS: 3,             // I3; GetShipsPerCred 08D1 with DIP 0
+    EXTRA_SHIP_MSB: 15,         // I3: 1,500 (0935, score MSB 0x15)
+    ROWS: 5,
+    COLS: 11,
+    ALIENS: 55,                 // I1; InitAliens 01C0
+    ALIEN_POINTS: [10, 10, 20, 20, 30],   // I2; AlienScoreValue 097C, row 0 at the bottom
+    RACK_START_YR: 0x78,        // First rack (07EA)
+    RACK_START_XR: 0x38,        // 07EA and 0A1E
+    // Racks 2 to 9; index (rackCnt AND 7) + 1 (0A0C), so rack 10 repeats 0x60.
+    RACK_YR_TABLE: [0x60, 0x50, 0x48, 0x48, 0x48, 0x40, 0x40, 0x40],   // 1DA3, owner decision O2
+    RACK_DOWN: -8,              // rackDownDelta F8 (mirror 200E)
+    INVADED_YR: 0x28,           // An alien below this Yr ends the game (016B)
+    PLAYER_YR: 0x20,            // Mirror 201A
+    PLAYER_XR: 0x30,            // Mirror 201B
+    PLAYER_XR_MIN: 0x30,        // 038F
+    PLAYER_XR_MAX: 0xD9,        // 0382
+    PLAYER_START_DELAY: 0x80,   // Player task timer (mirror 2011)
+    PLAYER_BLOW_STEPS: 12,      // expAnimateCnt (mirror 2017)
+    PLAYER_BLOW_TICKS: 5,       // expAnimateTimer (02A7)
+    ALIEN_FIRE_DELAY: 0x30,     // alienFireDelay (02A1)
+    SHOT_YR: 0x28,              // Player shot start (mirror 2029)
+    SHOT_DY: 4,                 // shotDeltaX (mirror 202C)
+    SHOT_TOP_YR: 0xD8,          // Miss at the top (14E4)
+    SAUCER_HIT_YR: 0xCE,        // A hit above this Yr is the saucer (14F0)
+    SHOT_BLOW_TICKS: 0x10,      // blowUpTimer (mirror 2026)
+    ALIEN_BLOW_TICKS: 0x10,     // expAlienTimer (152A)
+    SHIELD_XR: [0x40, 0x6D, 0x9A, 0xC7],  // 0224 and +0x2E0 per shield (023A)
+    SHIELD_YR: 0x30,            // Screen byte 6 (0224)
+    BOTTOM_LINE_YR: 16,         // DrawBottomLine 01CF
+    EDGE_RIGHT_XR: 0xF5,        // RackBump 159E: screen 3EA4
+    EDGE_LEFT_XR: 0x29,         // RackBump 15B7: screen 2524
+    // Fleet sound (1775): first count not above the live aliens gives the delay.
+    FLEET_COUNTS: [0x32, 0x2B, 0x24, 0x1C, 0x16, 0x11, 0x0D, 0x0A, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01],
+    FLEET_DELAYS: [0x34, 0x2E, 0x27, 0x22, 0x1C, 0x18, 0x15, 0x13, 0x10, 0x0E, 0x0D, 0x0C, 0x0B, 0x09, 0x07, 0x05],
+    FLEET_HOLD: 4,              // fleetSndHold (1767)
+    PROMPT_TICKS: 0xB0,         // PromptPlayer 08A4
+    RACK_END_TICKS: 0x30,       // 0A42
+    LETTER_TICKS: 7             // PrintMessageDel 0A99
+  };
+})();
+
 /* ===== DATA ===== */
+// Art is redrawn by eye at the ROM sizes (plan decision 15). No ROM bitmap
+// bytes are copied. Each picture is drawn the way it shows on the screen
+// ('*' is a lit pixel) and converted to ROM-style column bytes: one byte per
+// Xr column, bit 0 at the lowest Yr.
+SI.DATA = (function () {
+  'use strict';
+
+  // 8 rows of art -> one byte per column (row 0 is the top, bit 7).
+  function columns(rows) {
+    var out = [];
+    for (var x = 0; x < rows[0].length; x++) {
+      var b = 0;
+      for (var r = 0; r < 8; r++) if (rows[r][x] === '*') b |= 1 << (7 - r);
+      out.push(b);
+    }
+    return out;
+  }
+
+  // Pads art on the left and right to the ROM sprite width.
+  function pad(rows, left, width) {
+    return rows.map(function (r) {
+      var s = new Array(left + 1).join('.') + r;
+      while (s.length < width) s += '.';
+      return s;
+    });
+  }
+
+  // ---- Aliens: 16 columns x 8 rows (DrawAlien 0131). Index by type:
+  // 0 = bottom two rows (10 pts), 1 = middle two rows (20), 2 = top row (30).
+  var ALIEN_ART = [
+    [[ // Type A, 12 wide
+      '....****....',
+      '.**********.',
+      '************',
+      '***..**..***',
+      '************',
+      '...**..**...',
+      '..**.**.**..',
+      '**........**'
+    ], [
+      '....****....',
+      '.**********.',
+      '************',
+      '***..**..***',
+      '************',
+      '..***..***..',
+      '.**..**..**.',
+      '..**....**..'
+    ], 2],
+    [[ // Type B, 11 wide
+      '..*.....*..',
+      '...*...*...',
+      '..*******..',
+      '.**.***.**.',
+      '***********',
+      '*.*******.*',
+      '*.*.....*.*',
+      '...**.**...'
+    ], [
+      '..*.....*..',
+      '*..*...*..*',
+      '*.*******.*',
+      '***.***.***',
+      '***********',
+      '.*********.',
+      '..*.....*..',
+      '.*.......*.'
+    ], 3],
+    [[ // Type C, 8 wide
+      '...**...',
+      '..****..',
+      '.******.',
+      '**.**.**',
+      '********',
+      '..*..*..',
+      '.*.**.*.',
+      '*.*..*.*'
+    ], [
+      '...**...',
+      '..****..',
+      '.******.',
+      '**.**.**',
+      '********',
+      '.*.**.*.',
+      '*......*',
+      '.*....*.'
+    ], 4]
+  ];
+  var ALIENS = ALIEN_ART.map(function (a) {
+    return [columns(pad(a[0], a[2], 16)), columns(pad(a[1], a[2], 16))];
+  });
+
+  var ALIEN_EXPLOSION = columns(pad([
+    '....*...*....',
+    '.*...*.*...*.',
+    '..*.......*..',
+    '...*.....*...',
+    '**.........**',
+    '...*.....*...',
+    '..*..*.*..*..',
+    '.*..*...*..*.'
+  ], 1, 16));
+
+  // ---- Player: 16 columns x 8 rows, 13 wide (PlayerSprite 1C60 size).
+  var PLAYER = columns(pad([
+    '......*......',
+    '.....***.....',
+    '.....***.....',
+    '.***********.',
+    '*************',
+    '*************',
+    '*************',
+    '*************'
+  ], 2, 16));
+
+  var PLAYER_BLOWUP = [columns(pad([
+    '.....*.......',
+    '..*.......*..',
+    '.....*.*.....',
+    '*..*.***...*.',
+    '...*******...',
+    '.*********.*.',
+    '*************',
+    '.***********.'
+  ], 2, 16)), columns(pad([
+    '...*....*....',
+    '*.....*...*..',
+    '..*.*......*.',
+    '....*..*.....',
+    '.*.*****.*...',
+    '..*******..*.',
+    '.***********.',
+    '*************'
+  ], 2, 16))];
+
+  // ---- Player shot: 1 column, 4 pixels (1C90 size). Explosion: 8 x 8 (1C91).
+  var SHOT = columns(['.', '.', '.', '.', '*', '*', '*', '*']);
+  var SHOT_EXPLOSION = columns([
+    '*..**..*',
+    '..****..',
+    '.******.',
+    '*.****.*',
+    '.******.',
+    '..****..',
+    '.*.**.*.',
+    '*..**..*'
+  ]);
+
+  // ---- Alien shots: 4 frames of 3 columns. Explosion: 6 columns (1CDC size).
+  function frames(list) { return list.map(columns); }
+  var ROLLING = frames([
+    ['.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '...'],
+    ['.*.', '.**', '.*.', '.*.', '**.', '.*.', '.*.', '...'],
+    ['.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '...'],
+    ['.*.', '**.', '.*.', '.*.', '.**', '.*.', '.*.', '...']
+  ]);
+  var PLUNGER = frames([
+    ['.*.', '.*.', '.*.', '.*.', '.*.', '***', '...', '...'],
+    ['.*.', '.*.', '.*.', '***', '.*.', '.*.', '...', '...'],
+    ['.*.', '.*.', '***', '.*.', '.*.', '.*.', '...', '...'],
+    ['***', '.*.', '.*.', '.*.', '.*.', '.*.', '...', '...']
+  ]);
+  var SQUIGGLY = frames([
+    ['.*.', '*..', '.*.', '..*', '.*.', '*..', '.*.', '...'],
+    ['*..', '.*.', '..*', '.*.', '*..', '.*.', '..*', '...'],
+    ['.*.', '..*', '.*.', '*..', '.*.', '..*', '.*.', '...'],
+    ['..*', '.*.', '*..', '.*.', '..*', '.*.', '*..', '...']
+  ]);
+  var ALIEN_SHOT_EXPLOSION = columns([
+    '.*..*.',
+    '*.**..',
+    '.****.',
+    '******',
+    '.****.',
+    '*.**.*',
+    '.*..*.',
+    '......'
+  ]);
+
+  // ---- Saucer: 24 columns (SpriteSaucer 1D64 size), 16 wide in the middle.
+  var SAUCER = columns(pad([
+    '.....******.....',
+    '...**********...',
+    '..************..',
+    '.**.**.**.**.**.',
+    '****************',
+    '..***..**..***..',
+    '...*........*...',
+    '................'
+  ], 4, 24));
+  var SAUCER_EXPLOSION = columns(pad([
+    '..*....*..*...*....*..',
+    '*...*.....*......*...*',
+    '..*...*.*****.*...*...',
+    '....*.**********......',
+    '.*...**.**.**.**..*...',
+    '...*..*********...*..*',
+    '..*.....*.*.*.......*.',
+    '*....*..........*.....'
+  ], 1, 24));
+
+  // ---- Shield: 22 columns x 16 rows (ShieldImage 1D20 size). Two bytes per
+  // column in screen-memory order: Yr 48-55 first, then Yr 56-63.
+  var SHIELD_ART = [
+    '....**************....',
+    '...****************...',
+    '..******************..',
+    '.********************.',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '*******........*******',
+    '******..........******',
+    '*****............*****',
+    '*****............*****'
+  ];
+  var SHIELD = (function () {
+    var lo = columns(SHIELD_ART.slice(8)), hi = columns(SHIELD_ART.slice(0, 8));
+    var out = [];
+    for (var x = 0; x < lo.length; x++) out.push(lo[x], hi[x]);
+    return out;
+  })();
+
+  // ---- Font: 8 x 8 cells, glyphs 5 x 7 (DrawChar 08FF uses 8-byte cells).
+  var GLYPHS = {
+    'A': ['.***.', '*...*', '*...*', '*****', '*...*', '*...*', '*...*'],
+    'B': ['****.', '*...*', '*...*', '****.', '*...*', '*...*', '****.'],
+    'C': ['.***.', '*...*', '*....', '*....', '*....', '*...*', '.***.'],
+    'D': ['****.', '*...*', '*...*', '*...*', '*...*', '*...*', '****.'],
+    'E': ['*****', '*....', '*....', '****.', '*....', '*....', '*****'],
+    'F': ['*****', '*....', '*....', '****.', '*....', '*....', '*....'],
+    'G': ['.***.', '*...*', '*....', '*.***', '*...*', '*...*', '.***.'],
+    'H': ['*...*', '*...*', '*...*', '*****', '*...*', '*...*', '*...*'],
+    'I': ['.***.', '..*..', '..*..', '..*..', '..*..', '..*..', '.***.'],
+    'J': ['....*', '....*', '....*', '....*', '....*', '*...*', '.***.'],
+    'K': ['*...*', '*..*.', '*.*..', '**...', '*.*..', '*..*.', '*...*'],
+    'L': ['*....', '*....', '*....', '*....', '*....', '*....', '*****'],
+    'M': ['*...*', '**.**', '*.*.*', '*.*.*', '*...*', '*...*', '*...*'],
+    'N': ['*...*', '**..*', '*.*.*', '*..**', '*...*', '*...*', '*...*'],
+    'O': ['.***.', '*...*', '*...*', '*...*', '*...*', '*...*', '.***.'],
+    'P': ['****.', '*...*', '*...*', '****.', '*....', '*....', '*....'],
+    'Q': ['.***.', '*...*', '*...*', '*...*', '*.*.*', '*..*.', '.**.*'],
+    'R': ['****.', '*...*', '*...*', '****.', '*.*..', '*..*.', '*...*'],
+    'S': ['.***.', '*...*', '*....', '.***.', '....*', '*...*', '.***.'],
+    'T': ['*****', '..*..', '..*..', '..*..', '..*..', '..*..', '..*..'],
+    'U': ['*...*', '*...*', '*...*', '*...*', '*...*', '*...*', '.***.'],
+    'V': ['*...*', '*...*', '*...*', '*...*', '*...*', '.*.*.', '..*..'],
+    'W': ['*...*', '*...*', '*...*', '*.*.*', '*.*.*', '**.**', '*...*'],
+    'X': ['*...*', '*...*', '.*.*.', '..*..', '.*.*.', '*...*', '*...*'],
+    'Y': ['*...*', '*...*', '.*.*.', '..*..', '..*..', '..*..', '..*..'],
+    'Z': ['*****', '....*', '...*.', '..*..', '.*...', '*....', '*****'],
+    '0': ['.***.', '*...*', '*..**', '*.*.*', '**..*', '*...*', '.***.'],
+    '1': ['..*..', '.**..', '..*..', '..*..', '..*..', '..*..', '.***.'],
+    '2': ['.***.', '*...*', '....*', '...*.', '..*..', '.*...', '*****'],
+    '3': ['*****', '....*', '...*.', '..**.', '....*', '*...*', '.***.'],
+    '4': ['...*.', '..**.', '.*.*.', '*..*.', '*****', '...*.', '...*.'],
+    '5': ['*****', '*....', '****.', '....*', '....*', '*...*', '.***.'],
+    '6': ['..**.', '.*...', '*....', '****.', '*...*', '*...*', '.***.'],
+    '7': ['*****', '....*', '...*.', '..*..', '.*...', '.*...', '.*...'],
+    '8': ['.***.', '*...*', '*...*', '.***.', '*...*', '*...*', '.***.'],
+    '9': ['.***.', '*...*', '*...*', '.****', '....*', '...*.', '.**..'],
+    '<': ['...*.', '..*..', '.*...', '*....', '.*...', '..*..', '...*.'],
+    '>': ['.*...', '..*..', '...*.', '....*', '...*.', '..*..', '.*...'],
+    '=': ['.....', '.....', '*****', '.....', '*****', '.....', '.....'],
+    '*': ['.....', '*.*.*', '.***.', '*****', '.***.', '*.*.*', '.....'],
+    '?': ['.***.', '*...*', '....*', '...*.', '..*..', '.....', '..*..'],
+    '-': ['.....', '.....', '.....', '*****', '.....', '.....', '.....'],
+    '.': ['.....', '.....', '.....', '.....', '.....', '.....', '..*..'],
+    ' ': ['.....', '.....', '.....', '.....', '.....', '.....', '.....']
+  };
+  var FONT = {};
+  Object.keys(GLYPHS).forEach(function (ch) {
+    FONT[ch] = columns(pad(GLYPHS[ch].concat(['.....']), 1, 8));
+  });
+
+  // ROM messages (Midway set, plan R4).
+  var TEXT = {
+    HEADER: ' SCORE<1> HI-SCORE SCORE<2> ',   // MessageScore 1AE4
+    PLAY_PLAYER: 'PLAY PLAYER<1>',            // MesssageP1 1B70
+    GAME_OVER: 'GAME OVER',                   // MessageGOver 1AA6 (first 9 letters)
+    PLAY: 'PLAY',                             // MessagePlayY 1DAB
+    INVADERS: 'SPACE  INVADERS',              // MessageInvaders 1DAF
+    ADVANCE: '*SCORE ADVANCE TABLE*',         // MessageAdv 1CA3
+    MYSTERY: '=? MYSTERY',                    // 1DE0
+    PTS30: '=30 POINTS',                      // 1DEA
+    PTS20: '=20 POINTS',                      // 1DF4
+    PTS10: '=10 POINTS',                      // 1C99
+    // Saucer score strings (SaucSoreStr 1D94).
+    SAUCER: { 50: ' 50', 100: '100', 150: '150', 300: '300' }
+  };
+
+  return {
+    columns: columns, ALIENS: ALIENS, ALIEN_EXPLOSION: ALIEN_EXPLOSION,
+    PLAYER: PLAYER, PLAYER_BLOWUP: PLAYER_BLOWUP, SHOT: SHOT, SHOT_EXPLOSION: SHOT_EXPLOSION,
+    ROLLING: ROLLING, PLUNGER: PLUNGER, SQUIGGLY: SQUIGGLY, ALIEN_SHOT_EXPLOSION: ALIEN_SHOT_EXPLOSION,
+    SAUCER: SAUCER, SAUCER_EXPLOSION: SAUCER_EXPLOSION, SHIELD: SHIELD, FONT: FONT, TEXT: TEXT
+  };
+})();
+
+/* ===== RULES ===== */
+// Pure port of the 1978 game logic. The engine owns a 1-bit copy of screen
+// memory (224 rows of 32 bytes, plan decision 4): collision, shield erosion
+// and aliens that overwrite shields all come from pixel tests on it, as in
+// the ROM. One step() is one 60 Hz frame: the mid-screen interrupt half
+// (8C), then the end-screen half (10), each followed by one pass of the main
+// game loop (081F).
+SI.RULES = (function () {
+  'use strict';
+  var C = SI.CONST, D = SI.DATA;
+
+  // ---- Screen memory. Row r is Xr = r + 0x20; byte k holds Yr 8k..8k+7.
+  var ROWS = 224, BYTES = 32;
+
+  // Pixel number (Xr, Yr) -> byte index (ConvToScr 1A47), or -1 when the
+  // address is outside screen memory.
+  function addr(xr, yr) {
+    var row = (xr & 0xFF) - 0x20;
+    if (row < 0 || row >= ROWS) return -1;
+    return row * BYTES + ((yr & 0xFF) >> 3);
+  }
+
+  function put(g, i, v) { if (i >= 0 && i < ROWS * BYTES) g.vram[i] = v; }
+  function get(g, i) { return i >= 0 && i < ROWS * BYTES ? g.vram[i] : 0; }
+
+  // A sprite byte moved up by Yr AND 7 (the hardware shift register).
+  function shifted(b, yr) { return (b << ((yr & 0xFF) & 7)) & 0xFFFF; }
+
+  // DrawShiftedSprite 1400: OR a shifted sprite.
+  function drawShifted(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      put(g, i, get(g, i) | (s & 0xFF));
+      if ((i & 31) < 31) put(g, i + 1, get(g, i + 1) | (s >> 8));
+    }
+  }
+
+  // EraseShifted 1452: AND NOT a shifted sprite.
+  function eraseShifted(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      put(g, i, get(g, i) & ~(s & 0xFF) & 0xFF);
+      if ((i & 31) < 31) put(g, i + 1, get(g, i + 1) & ~(s >> 8) & 0xFF);
+    }
+  }
+
+  // DrawSprCollision 1491: OR a shifted sprite; true when a pixel was lit.
+  function drawCollide(g, img, xr, yr) {
+    var hit = false;
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      if (get(g, i) & s & 0xFF) hit = true;
+      put(g, i, get(g, i) | (s & 0xFF));
+      if ((i & 31) < 31) {
+        if (get(g, i + 1) & (s >> 8)) hit = true;
+        put(g, i + 1, get(g, i + 1) | (s >> 8));
+      }
+    }
+    return hit;
+  }
+
+  // DrawSprite 15D3: overwrite two bytes per row with the shifted sprite.
+  // Aliens drawn this way clear shield pixels under them.
+  function drawOver(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      put(g, i, s & 0xFF);
+      if ((i & 31) < 31) put(g, i + 1, s >> 8);
+    }
+  }
+
+  // DrawSimpSprite 1439: overwrite one byte per row, no shift.
+  function drawSimple(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) put(g, addr(xr + c, yr), img[c]);
+  }
+
+  // EraseSimpleSprite 1424: clear two bytes per row.
+  function eraseSimple(g, n, xr, yr) {
+    for (var c = 0; c < n; c++) {
+      var i = addr(xr + c, yr);
+      if (i < 0) continue;
+      put(g, i, 0);
+      if ((i & 31) < 31) put(g, i + 1, 0);
+    }
+  }
+
+  // ClearSmallSprite 14CB: clear one byte per row.
+  function clearSmall(g, n, xr, yr) {
+    for (var c = 0; c < n; c++) put(g, addr(xr + c, yr), 0);
+  }
+
+  function printText(g, text, xr, yr) {
+    for (var k = 0; k < text.length; k++) drawSimple(g, D.FONT[text[k]] || D.FONT[' '], xr + 8 * k, yr);
+  }
+
+  // ClearPlayField 09D6: clear bytes 2 to 27 of every row (Yr 16 to 223).
+  function clearPlayField(g) {
+    for (var r = 0; r < ROWS; r++) for (var k = 2; k < 28; k++) g.vram[r * BYTES + k] = 0;
+  }
+
+  // DrawBottomLine 01CF: byte 0x01 at Yr 16 in every row.
+  function drawBottomLine(g) {
+    for (var r = 0; r < ROWS; r++) g.vram[r * BYTES + (C.BOTTOM_LINE_YR >> 3)] = 0x01;
+  }
+
+  // RestoreShields 1A69: OR the 4 shield pictures onto the screen.
+  function drawShields(g) {
+    for (var s = 0; s < 4; s++) {
+      for (var c = 0; c < 22; c++) {
+        var i = addr(C.SHIELD_XR[s] + c, C.SHIELD_YR);
+        g.vram[i] |= D.SHIELD[c * 2];
+        g.vram[i + 1] |= D.SHIELD[c * 2 + 1];
+      }
+    }
+  }
+
+  // ---- Rack geometry.
+  // GetAlienCoords 017A: index -> { yr, xr, row }. Rows are 16 apart in Yr
+  // and columns 16 apart in Xr from the reference (bottom-left) alien.
+  function alienCoords(g, idx) {
+    var row = Math.floor(idx / C.COLS), col = idx % C.COLS;
+    return { yr: (g.refYr + 16 * row) & 0xFF, xr: (g.refXr + 16 * col) & 0xFF, row: row };
+  }
+
+  // Cnt16s 1554 without the WrapRef bug (plan: fix CodeBug1): the number of
+  // 16-pixel steps from ref up to target, at least 1.
+  function steps16(ref, target) {
+    var n = Math.ceil((target - ref) / 16);
+    return n < 1 ? 1 : n;
+  }
+
+  // FindColumn 156F: 1-based column over Xr.
+  function findColumn(g, xr) { return steps16(g.refXr, xr); }
+
+  // AlienScoreValue 097C.
+  function alienPoints(row) { return C.ALIEN_POINTS[row]; }
+
+  // FleetDelayExShip 1775: delay for the live alien count.
+  function fleetDelay(n) {
+    for (var i = 0; i < C.FLEET_COUNTS.length; i++) if (n >= C.FLEET_COUNTS[i]) return C.FLEET_DELAYS[i];
+    return C.FLEET_DELAYS[C.FLEET_DELAYS.length - 1];
+  }
+
+  // ---- Sounds. Port 3 bits (SoundBits3On 18FA) and port 5 bits (fleet and
+  // saucer hit). Rising edges become events for the platform.
+  var SND = { UFO: 0x01, SHOT: 0x02, PLAYER_HIT: 0x04, ALIEN_HIT: 0x08, EXTRA: 0x10 };
+  var SND_EVENT = { 2: 'shot', 4: 'playerHit', 8: 'alienHit', 16: 'extraLife' };
+
+  function soundOn(g, bits) {
+    var rise = bits & ~g.sound3;
+    g.sound3 |= bits;
+    for (var b = 2; b <= 16; b <<= 1) if (rise & b) g.events.push({ type: SND_EVENT[b] });
+  }
+  function soundOff(g, mask) { g.sound3 &= mask; }
+
+  // ---- RAM mirror (CopyRAMMirror 01E4, data at 1B00).
+  function mirrorPlayer(g) {
+    g.obj[0] = { timer: C.PLAYER_START_DELAY, extra: 0 };
+    g.playerAlive = 0xFF;
+    g.expTimer = C.PLAYER_BLOW_TICKS;
+    g.expCount = C.PLAYER_BLOW_STEPS;
+    g.playerImg = D.PLAYER;
+    g.playerYr = C.PLAYER_YR;
+    g.playerXr = C.PLAYER_XR;
+  }
+
+  function mirrorShot(g) {
+    g.shot = { status: 0, timer: C.SHOT_BLOW_TICKS, img: D.SHOT, yr: C.SHOT_YR, xr: 0x30 };
+  }
+
+  function copyRamMirror(g) {
+    g.waitOnDraw = 1;
+    g.alienExploding = 0;
+    g.expAlienTimer = C.ALIEN_BLOW_TICKS;
+    g.alienRow = 0;
+    g.alienFrame = 0;
+    g.alienIndex = 0;
+    g.refDY = 0;
+    g.refDX = 2;
+    g.refYr = C.RACK_START_YR;
+    g.refXr = C.RACK_START_XR;
+    g.alienPosYr = C.RACK_START_YR;
+    g.alienPosXr = C.RACK_START_XR;
+    g.rackDirection = 0;
+    g.obj = [null, { timer: 0, extra: 0 }, { timer: 0, extra: 2 }, { timer: 0, extra: 0 }, { timer: 0, extra: 0 }];
+    mirrorPlayer(g);
+    mirrorShot(g);
+    g.fireBounce = 0;
+    g.expAlienYr = 0;
+    g.expAlienXr = 0;
+    g.playerOK = 1;
+    g.enableAlienFire = 0;
+    g.alienFireDelay = C.ALIEN_FIRE_DELAY;
+    g.invaded = 0;
+    g.skipPlunger = 0;
+    g.shotSync = 1;
+    g.numAliens = 0xFF;
+    g.alienShotDelta = -4;      // 207E
+    g.sound3 = 0;               // 2094
+    g.changeFleet = 1;          // 2095
+    g.fleetCount = 0x40;        // 2096
+    g.fleetReload = 0;          // 2097
+    g.fleetTone = 0;            // 2098 bit 0 (tone 1)
+  }
+
+  // InitRack 00B1: copy the stored reference position and direction.
+  function initRack(g) {
+    g.refYr = g.store.yr;
+    g.refXr = g.store.xr;
+    g.alienPosYr = g.store.yr;
+    g.alienPosXr = g.store.xr;
+    var dx = g.store.dx === 3 ? 2 : g.store.dx;
+    g.refDX = dx;
+    g.rackDirection = dx === -2 ? 1 : 0;
+  }
+
+  // ---- New game (NewGame 0798 to 0817, one player).
+  function createGame() {
+    var g = {
+      vram: new Uint8Array(ROWS * BYTES),
+      aliens: new Uint8Array(C.ALIENS),
+      score: 0,
+      ships: C.START_SHIPS,
+      livesDigit: C.START_SHIPS,
+      extraAvailable: true,
+      rackCnt: 0,
+      store: { yr: C.RACK_START_YR, xr: C.RACK_START_XR, dx: 2 },
+      reloadRate: 8,            // 18DF
+      tasksOn: false,
+      phase: 'prompt',
+      sub: 0,
+      isrDelay: 0,
+      vblank: 0,
+      frame: 0,
+      events: [],
+      input: { left: false, right: false, fire: false },
+      promptBlank: false,
+      deathPending: false,
+      overLetters: 0
+    };
+    for (var i = 0; i < C.ALIENS; i++) g.aliens[i] = 1;
+    copyRamMirror(g);
+    // RemoveShip 1A7F: one ship goes to the cannon; the digit shows the count.
+    g.livesDigit = g.ships;
+    g.ships--;
+    // PromptPlayer 088D: "PLAY PLAYER<1>" for 176 ticks with the score blinking.
+    printText(g, D.TEXT.PLAY_PLAYER, 0x58, 0x88);
+    g.isrDelay = C.PROMPT_TICKS;
+    return g;
+  }
+
+  // Shields, bottom line and rack for the first rack and after each rack.
+  function startRack(g) {
+    clearPlayField(g);
+    drawBottomLine(g);
+    drawShields(g);
+    initRack(g);
+    g.tasksOn = true;
+    g.phase = 'play';
+    g.sub = 0;
+  }
+
+  // ---- Game object 0: the player (028E). Runs at the end-screen half only.
+  function playerTask(g) {
+    if (g.playerAlive !== 0xFF) {
+      if (--g.expTimer !== 0) return;
+      g.playerOK = 0;
+      g.enableAlienFire = 0;
+      g.alienFireDelay = C.ALIEN_FIRE_DELAY;
+      g.expTimer = C.PLAYER_BLOW_TICKS;
+      if (--g.expCount !== 0) {
+        g.playerAlive = (g.playerAlive + 1) & 1;          // DrawPlayerDie 039B
+        g.playerImg = D.PLAYER_BLOWUP[g.playerAlive];
+        drawSimple(g, g.playerImg, g.playerXr, g.playerYr);
+        return;
+      }
+      // Blow-up finished (02AE).
+      eraseSimple(g, 16, g.playerXr, g.playerYr);
+      mirrorPlayer(g);
+      g.sound3 = 0;
+      if (g.invaded) return;
+      g.deathPending = true;
+      return;
+    }
+    g.playerOK = 1;
+    if (!g.enableAlienFire && --g.alienFireDelay === 0) g.enableAlienFire = 1;
+    var i = g.input;
+    if (i.right) { if (g.playerXr !== C.PLAYER_XR_MAX) g.playerXr++; }
+    else if (i.left) { if (g.playerXr !== C.PLAYER_XR_MIN) g.playerXr--; }
+    drawSimple(g, g.playerImg, g.playerXr, g.playerYr);
+  }
+
+  // ---- Game object 1: the player shot (03BB).
+  function compYToBeam(g, xr) { return ((xr & 0x80) ^ g.vblank) === 0; }
+
+  function endOfBlowup(g) {
+    var s = g.shot;
+    eraseShifted(g, s.img, s.xr, s.yr);
+    mirrorShot(g);
+    shotEnded(g);
+  }
+
+  function shotTask(g) {
+    var s = g.shot;
+    if (!compYToBeam(g, s.xr)) return;
+    if (s.status === 0) return;
+    if (s.status === 1) {                                   // InitPlyShot 03FA
+      s.status = 2;
+      s.xr = (g.playerXr + 8) & 0xFF;
+      drawShifted(g, s.img, s.xr, s.yr);
+      return;
+    }
+    if (s.status === 2) {                                   // MovePlyShot 040A
+      eraseShifted(g, s.img, s.xr, s.yr);
+      s.yr = (s.yr + C.SHOT_DY) & 0xFF;
+      if (drawCollide(g, s.img, s.xr, s.yr)) g.alienExploding = 1;
+      return;
+    }
+    if (s.status === 3) {                                   // 03D7
+      if (--s.timer === 0) { endOfBlowup(g); return; }
+      if (s.timer !== 0x0F) return;
+      eraseShifted(g, s.img, s.xr, s.yr);
+      s.img = D.SHOT_EXPLOSION;
+      s.yr = (s.yr - 2) & 0xFF;
+      s.xr = (s.xr - 3) & 0xFF;
+      drawShifted(g, s.img, s.xr, s.yr);
+      return;
+    }
+    if (s.status === 5) return;
+    endOfBlowup(g);
+  }
+
+  // Hook for shot bookkeeping (saucer score pointer, 0447). Phase 7 fills it.
+  function shotEnded(g) { /* see Phase 7 */ }
+
+  // Game objects 2 to 4: alien shots and saucer (Phase 7).
+  function alienTask() { /* stubbed off in Phase 6 */ }
+
+  // RunGameObjs 0248: timers count down first; a task runs when its timers
+  // are all 0.
+  function runObjects(g, first) {
+    for (var k = first; k <= 4; k++) {
+      var o = g.obj[k];
+      if (o.timer !== 0) { o.timer--; continue; }
+      if (o.extra !== 0) { o.extra--; continue; }
+      if (k === 0) playerTask(g);
+      else if (k === 1) shotTask(g);
+      else alienTask(g, k);
+    }
+  }
+
+  // ---- Aliens.
+  // DrawAlien 0100 (end-screen half).
+  function drawAlien(g) {
+    if (g.alienExploding) {                                 // AExplodeTime 1538
+      if (--g.expAlienTimer !== 0) return;
+      eraseSimple(g, 16, g.expAlienXr, g.expAlienYr);
+      g.shot.status = 4;
+      g.alienExploding = 0;
+      soundOff(g, ~SND.ALIEN_HIT);
+      return;
+    }
+    if (g.aliens[g.alienIndex]) {
+      var type = g.alienRow >> 1;                           // 011C: rows 0-1, 2-3, 4
+      drawOver(g, D.ALIENS[type][g.alienFrame], g.alienPosXr, g.alienPosYr);
+    }
+    g.waitOnDraw = 0;
+  }
+
+  // MoveRefAlien 01A1.
+  function moveRefAlien(g) {
+    g.refYr = (g.refYr + g.refDY) & 0xFF;
+    g.refXr = (g.refXr + g.refDX) & 0xFF;
+    g.refDY = 0;
+    g.alienFrame ^= 1;
+  }
+
+  // CursorNextAlien 0141 (mid-screen half).
+  function cursorNextAlien(g) {
+    if (!g.playerOK || g.waitOnDraw) return;
+    var idx = g.alienIndex, wraps = 0;
+    for (;;) {
+      idx++;
+      if (idx === C.ALIENS) {
+        if (++wraps === 2) return;                          // ReturnTwo 01CD
+        moveRefAlien(g);
+        idx = 0;
+      }
+      if (g.aliens[idx]) break;
+    }
+    g.alienIndex = idx;
+    var p = alienCoords(g, idx);
+    g.alienPosYr = p.yr;
+    g.alienPosXr = p.xr;
+    if (p.yr < C.INVADED_YR) { invade(g); return; }
+    g.alienRow = p.row;
+    g.waitOnDraw = 1;
+  }
+
+  // 1971 and 16E6: the rack reached the bottom.
+  function invade(g) {
+    g.invaded = 1;
+    g.playerAlive = 0;
+    g.phase = 'invaded';
+  }
+
+  // ---- Main game loop parts.
+  // PlrFireOrDemo 1618.
+  function plrFire(g) {
+    if (g.playerAlive !== 0xFF) return;
+    if (g.obj[0].timer !== 0) return;
+    if (g.shot.status !== 0) return;
+    if (g.fireBounce) { if (!g.input.fire) g.fireBounce = 0; return; }
+    if (g.input.fire) { g.shot.status = 1; g.fireBounce = 1; }
+  }
+
+  // PlayerShotHit 14D8, with CodeBug1 fixed: the row and column come from
+  // the hit point and must be inside the 5 x 11 rack.
+  function playerShotHit(g) {
+    var s = g.shot;
+    if (s.status !== 2) return;
+    if (s.yr >= C.SHOT_TOP_YR) { shotMiss(g); return; }
+    if (!g.alienExploding) return;
+    if (s.yr >= C.SAUCER_HIT_YR) { saucerShot(g); return; }
+    var target = s.yr + 6;
+    var ref = g.refYr >= 0x90 ? g.refYr - 256 : g.refYr;    // 14FB: the reference can wrap below 0
+    if (target <= ref) { shotMiss(g); return; }
+    var row = steps16(ref, target) - 1, col = findColumn(g, s.xr);
+    g.expAlienYr = (ref + 16 * row) & 0xFF;
+    g.expAlienXr = (g.refXr + 16 * (col - 1)) & 0xFF;
+    s.status = 5;
+    var idx = row * C.COLS + col - 1;
+    if (row > 4 || col > C.COLS || !g.aliens[idx]) { shotMiss(g); return; }
+    g.aliens[idx] = 0;
+    addScore(g, alienPoints(row));                          // ScoreForAlien 0A5F
+    soundOn(g, SND.ALIEN_HIT);
+    drawOver(g, D.ALIEN_EXPLOSION, g.expAlienXr, g.expAlienYr);
+    g.expAlienTimer = C.ALIEN_BLOW_TICKS;
+  }
+
+  // 1530: the shot left the field, hit a shield or hit an alien shot.
+  function shotMiss(g) {
+    g.shot.status = 3;
+    g.alienExploding = 0;
+    soundOff(g, ~SND.ALIEN_HIT);
+  }
+
+  // 1579 (Phase 7 adds the saucer).
+  function saucerShot(g) { shotMiss(g); }
+
+  // AdjustScore 0988. The score caps at 9,999 (I11).
+  function addScore(g, n) {
+    g.score = Math.min(C.MAX_SCORE, g.score + n);
+  }
+
+  // RackBump 1597: 23 bytes up the screen edge, from Yr 32.
+  function edgeHit(g, xr) {
+    var i = addr(xr, 0x20);
+    for (var k = 0; k < 23; k++) if (g.vram[i + k]) return true;
+    return false;
+  }
+
+  function rackBump(g) {
+    if (g.rackDirection === 0) {
+      if (!edgeHit(g, C.EDGE_RIGHT_XR)) return;
+      g.refDX = -2;
+      g.rackDirection = 1;
+    } else {
+      if (!edgeHit(g, C.EDGE_LEFT_XR)) return;
+      g.refDX = g.numAliens === 1 ? 3 : 2;                  // 18F1
+      g.rackDirection = 0;
+    }
+    g.refDY = C.RACK_DOWN;
+  }
+
+  // CountAliens 15F3.
+  function countAliens(g) {
+    var n = 0;
+    for (var i = 0; i < C.ALIENS; i++) n += g.aliens[i];
+    g.numAliens = n;
+  }
+
+  // Extra ship 0935: once, at score MSB 15 (1,500).
+  function extraShip(g) {
+    if (!g.extraAvailable || Math.floor(g.score / 100) < C.EXTRA_SHIP_MSB) return;
+    g.ships++;
+    g.livesDigit = g.ships + 1;
+    g.extraAvailable = false;
+    soundOn(g, SND.EXTRA);
+  }
+
+  // TimeFleetSound 1740 (end-screen half).
+  function timeFleetSound(g) {
+    if (!g.playerOK) return;
+    g.fleetCount = (g.fleetCount - 1) & 0xFF;
+    if (g.fleetCount !== 0) return;
+    if (g.numAliens === 0) return;
+    g.events.push({ type: 'march', tone: g.fleetTone });   // OUT port 5 (1757)
+    g.fleetCount = g.fleetReload;
+    g.changeFleet = 1;
+  }
+
+  // FleetDelayExShip 1775 (main loop): new delay and the next of 4 tones.
+  function fleetDelayTask(g) {
+    if (!g.changeFleet) return;
+    g.fleetReload = fleetDelay(g.numAliens);
+    g.fleetTone = (g.fleetTone + 1) & 3;
+    g.changeFleet = 0;
+  }
+
+  // The main game loop (081F), one pass.
+  function gameLoop(g) {
+    plrFire(g);
+    playerShotHit(g);
+    rackBump(g);
+    countAliens(g);
+    if (g.numAliens === 0) { g.phase = 'rackEnd'; g.sub = 0; return; }
+    g.reloadRate = reloadRate(g.score);
+    extraShip(g);
+    if (g.numAliens < 9) g.alienShotDelta = -5;             // SpeedShots 08D8
+    if (g.shot.status !== 0) soundOn(g, SND.SHOT); else soundOff(g, ~SND.SHOT);   // ShotSound 172C
+    if (g.playerAlive !== 0xFF) soundOn(g, SND.PLAYER_HIT); // 083E
+    fleetDelayTask(g);
+  }
+
+  // AShotReloadRate 170E: by score MSB (1CB8 and 1AA1).
+  function reloadRate(score) {
+    var msb = Math.floor(score / 100), lim = [2, 10, 20, 30], rate = [0x30, 0x10, 0x0B, 0x08];
+    for (var i = 0; i < 4; i++) if (msb <= lim[i]) return rate[i];
+    return 0x07;
+  }
+
+  // ---- Main thread by phase.
+  function mainThread(g) {
+    if (g.deathPending) {                                   // 02D0 after a blow-up
+      g.deathPending = false;
+      if (g.ships === 0) { gameOver(g); return; }
+      g.livesDigit = g.ships;
+      g.ships--;
+      g.events.push({ type: 'lifeLost' });
+      g.phase = 'play';
+      g.sub = 0;
+    }
+    switch (g.phase) {
+      case 'prompt':
+        g.promptBlank = (g.isrDelay & 4) !== 0;
+        if (g.isrDelay === 0) { g.promptBlank = false; startRack(g); }
+        return;
+      case 'play':
+        gameLoop(g);
+        return;
+      case 'rackEnd':
+        rackEnd(g);
+        return;
+      case 'invaded':
+        playerShotHit(g);
+        soundOn(g, SND.PLAYER_HIT);
+        if (g.playerAlive === 0xFF) { g.ships = 0; g.livesDigit = 0; gameOver(g); }
+        return;
+      case 'over':
+        overMessage(g);
+        return;
+    }
+  }
+
+  // 09EF and 0A3C: end of a rack.
+  function rackEnd(g) {
+    if (g.sub === 0) {
+      if (g.playerAlive === 0xFF) { g.isrDelay = C.RACK_END_TICKS; g.sub = 1; } else g.sub = 2;
+      return;
+    }
+    if (g.sub === 1) {
+      if (g.playerAlive !== 0xFF) { g.sub = 2; return; }
+      if (g.isrDelay !== 0) return;
+      g.sub = 2;
+    }
+    if (g.playerAlive !== 0xFF) return;
+    g.tasksOn = false;
+    clearPlayField(g);
+    copyRamMirror(g);
+    g.rackCnt = (g.rackCnt & 7) + 1;
+    g.store.yr = C.RACK_YR_TABLE[g.rackCnt - 1];
+    g.store.xr = C.RACK_START_XR;
+    for (var i = 0; i < C.ALIENS; i++) g.aliens[i] = 1;
+    g.events.push({ type: 'waveClear', rack: g.rackCnt });
+    startRack(g);
+  }
+
+  // 166D and 16C9: game over. "GAME OVER" prints one letter per 7 ticks.
+  function gameOver(g) {
+    g.tasksOn = false;
+    g.sound3 = 0;
+    g.livesDigit = 0;
+    g.phase = 'over';
+    g.overLetters = 0;
+    g.isrDelay = 1;
+    g.events.push({ type: 'gameOver', score: g.score });
+  }
+
+  function overMessage(g) {
+    if (g.overLetters >= D.TEXT.GAME_OVER.length || g.isrDelay !== 1) return;
+    var k = g.overLetters++;
+    printText(g, D.TEXT.GAME_OVER[k], 0x68 + 8 * k, 0xC0);
+    g.isrDelay = C.LETTER_TICKS;
+  }
+
+  function timeToSaucer() { /* Phase 7 */ }
+
+  // ---- One 60 Hz frame. input: { left, right, fire } held.
+  function step(g, input) {
+    g.events = [];
+    g.input = input || { left: false, right: false, fire: false };
+    // Mid-screen interrupt (008C).
+    g.vblank = 0;
+    if (g.tasksOn) { runObjects(g, 1); cursorNextAlien(g); }
+    mainThread(g);
+    // End-screen interrupt (0010).
+    g.vblank = 0x80;
+    g.isrDelay = (g.isrDelay - 1) & 0xFF;
+    if (g.tasksOn) {
+      timeFleetSound(g);
+      g.shotSync = g.obj[2].extra;
+      drawAlien(g);
+      runObjects(g, 0);
+      timeToSaucer(g);
+    }
+    mainThread(g);
+    g.frame++;
+    return g.events;
+  }
+
+  // Screen pixel test: x 0-223 left to right, y 0-255 top to bottom.
+  function pixel(g, x, y) {
+    var yr = 255 - y;
+    return (g.vram[x * BYTES + (yr >> 3)] >> (yr & 7)) & 1;
+  }
+
+  return {
+    createGame: createGame, step: step, pixel: pixel, addr: addr,
+    alienCoords: alienCoords, fleetDelay: fleetDelay, reloadRate: reloadRate,
+    findColumn: findColumn, steps16: steps16, ROWS: ROWS, BYTES: BYTES
+  };
+})();
+
 /* ===== VIEW ===== */
 /* ===== APP ===== */
 /* ==END LOGIC== */
