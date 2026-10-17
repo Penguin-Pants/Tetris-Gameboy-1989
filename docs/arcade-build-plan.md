@@ -782,3 +782,32 @@ Readiness:
 5. No engineering ambiguity blocks coding. Source conflicts are decided (decisions 9 to 11).
 6. Product decisions are resolved (O1, O2). Non-blocking readings are R1 to R10.
 7. A coding agent can run Phases 1 to 10 in order without redesign.
+
+---
+
+## 12. Implementation status
+
+| Phase | Status |
+|---|---|
+| 1 to 5 (shared layer, Pong) | ✅ Done |
+| 6 to 9 (Space Invaders) | ✅ Done |
+| 10 (full acceptance) | ✅ Done. Owner checks open (look, sound, difficulty feel) |
+
+**Results**
+- `npm test`: 190 pass (109 Tetris). `npm run test:e2e`: all pass, Tetris specs included.
+- No Tetris file changed. No network, `eval` or external resource in either game file.
+- Pong CPU win rate against `REF` (300 seeded matches): Easy 20.7%, Normal 51.0%, Hard 83.7%. `NOVICE` beats Easy in 90.7%.
+
+**Changes from the plan**
+- Decision 12: the CPU has a fourth parameter, `aim` (chance to return the ball upward). Error alone could not lift the CPU win rate above about 70%.
+- Shared platform: a `focus` listener resumes the Pong final score and the Space Invaders game-over banner after a blur. Play stays paused until Enter (E5).
+- Shared platform: `unlock()` resumes an audio context that a browser starts suspended.
+- Shared store: a corrupt saved value is removed before the fallback, so a later session can save again.
+- Footer: the M key shows next to the sound state.
+
+**ROM facts confirmed during Phases 6 and 7 (Code.html)**
+- Each alien shot moves 4 px every 3 frames (80 px/s), gated by `shotSync` (0072, 04BC, 0683).
+- The cannon runs only in the end-screen interrupt (007B).
+- After a hit the timers run in sequence: explosion 12 × 5 ticks (02A7), respawn 0x80 (mirror 1B10), then 0x30 cannon updates before aliens fire (03B3).
+
+**Known limit:** two presses of one key inside one 1/60 s frame count once, as in Tetris.
