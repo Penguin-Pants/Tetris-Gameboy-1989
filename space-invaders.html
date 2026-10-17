@@ -44,6 +44,7 @@ body { display: flex; flex-direction: column; font-family: "Courier New", Courie
 #footer .item, #sound { white-space: nowrap; }
 #notice { margin: 0; font-weight: 700; white-space: nowrap; }
 #notice[hidden] { display: none; }
+#keys .item { margin: 0 8px; }
 </style>
 </head>
 <body>
@@ -1480,7 +1481,164 @@ SI.RULES = (function () {
 })();
 
 /* ===== VIEW ===== */
+// Pure renderer into a 224 x 256 framebuffer of 0 (black) and 1 (white).
+// x runs left to right, y top to bottom. The game picture comes from the
+// rules' screen memory; the HUD is drawn on top at the ROM positions.
+SI.VIEW = (function () {
+  'use strict';
+  var C = SI.CONST, D = SI.DATA, W = C.SCREEN_W, H = C.SCREEN_H;
+
+  function createFramebuffer() { return new Uint8Array(W * H); }
+  function clear(fb) { fb.fill(0); }
+
+  // Column bytes (bit 7 at the top) at screen (x, y): 8 rows.
+  function columns(fb, cols, x, y) {
+    for (var c = 0; c < cols.length; c++) {
+      var px = x + c;
+      if (px < 0 || px >= W) continue;
+      for (var b = 0; b < 8; b++) {
+        var py = y + 7 - b;
+        if (py >= 0 && py < H && (cols[c] >> b) & 1) fb[py * W + px] = 1;
+      }
+    }
+  }
+
+  function erase(fb, x, y, w, h) {
+    for (var py = y; py < y + h; py++) for (var px = x; px < x + w; px++) {
+      if (px >= 0 && px < W && py >= 0 && py < H) fb[py * W + px] = 0;
+    }
+  }
+
+  // Text in 8 x 8 cells.
+  function text(fb, s, x, y) {
+    for (var i = 0; i < s.length; i++) columns(fb, D.FONT[s[i]] || D.FONT[' '], x + 8 * i, y);
+  }
+
+  function centered(fb, s, y) { text(fb, s, Math.floor((W - 8 * s.length) / 2), y); }
+
+  function digits4(n) { return ('0000' + n).slice(-4); }
+
+  // Screen memory: row x, byte k holds Yr 8k..8k+7; y = 255 - Yr.
+  function blitGame(fb, g) {
+    var v = g.vram;
+    for (var x = 0; x < W; x++) {
+      for (var k = 0; k < 32; k++) {
+        var b = v[x * 32 + k];
+        if (!b) continue;
+        for (var bit = 0; bit < 8; bit++) if ((b >> bit) & 1) fb[(255 - (8 * k + bit)) * W + x] = 1;
+      }
+    }
+  }
+
+  // HUD (I11): header (241E), SCORE<1> (271C), HI-SCORE (2F1C), lives
+  // digit (2501) and spare cannons (2701).
+  function hud(fb, o) {
+    text(fb, D.TEXT.HEADER, 0, 8);
+    if (!o.blankScore) text(fb, digits4(o.score), 24, 24);
+    text(fb, digits4(o.hi), 88, 24);
+    if (o.lives === undefined) return;
+    text(fb, String(o.lives), 8, 240);
+    for (var i = 0; i < o.ships && i < 7; i++) columns(fb, D.PLAYER, 24 + 16 * i, 240);
+  }
+
+  // Play screen. o: { hi, label }.
+  function renderPlay(fb, g, o) {
+    clear(fb);
+    blitGame(fb, g);
+    hud(fb, { score: g.score, hi: o.hi, lives: g.livesDigit, ships: g.ships, blankScore: g.promptBlank });
+    if (o.label) {
+      var w = 8 * o.label.length + 8, x = Math.floor((W - w) / 2);
+      erase(fb, x, 124, w, 16);
+      centered(fb, o.label, 128);
+    }
+  }
+
+  return {
+    createFramebuffer: createFramebuffer, clear: clear, text: text, centered: centered,
+    columns: columns, hud: hud, renderPlay: renderPlay, blitGame: blitGame, digits4: digits4, W: W, H: H
+  };
+})();
+
 /* ===== APP ===== */
+// Screen state machine. Phase 8 holds a temporary flow: Enter starts a
+// game; after game over the screen goes back to the start screen.
+SI.APP = (function () {
+  'use strict';
+  var C = SI.CONST, R = SI.RULES, V = SI.VIEW;
+
+  // Fixed keys (IK1, IK2, S4).
+  var KEY_MAP = { ArrowLeft: 'left', ArrowRight: 'right', Space: 'fire', Enter: 'start', KeyM: 'sound' };
+  var FOOTER_KEYS = [['← →', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'START/PAUSE'], ['M', 'SOUND']];
+  var BANNER_FRAMES = 3 * C.FPS;      // IF3 (default): game-over banner
+
+  function createApp(opts) {
+    var store = opts.store;
+    var app = {
+      screen: 'title',
+      game: null,
+      paused: false,
+      timer: 0,
+      frame: 0,
+      soundOn: store.load('sound', ARCADE.validateSound, function () { return true; }),
+      store: store
+    };
+
+    app.hiScore = function () { return 0; };
+
+    app.pause = function () { if (app.screen === 'play') app.paused = true; };
+
+    // inp: { held, pressed } from ARCADE.createInput. Returns sound events.
+    app.step = function (inp) {
+      var p = inp.pressed, h = inp.held, events = [];
+      app.frame++;
+      if (p.sound) {
+        app.soundOn = !app.soundOn;
+        store.save('sound', app.soundOn);
+      }
+      if (app.screen === 'title') {
+        if (p.start) {
+          app.game = R.createGame();
+          app.paused = false;
+          app.screen = 'play';
+        }
+      } else if (app.screen === 'play') {
+        if (p.start) app.paused = !app.paused;
+        if (!app.paused) {
+          events = R.step(app.game, { left: h.left, right: h.right, fire: h.fire });
+          for (var i = 0; i < events.length; i++) {
+            if (events[i].type === 'gameOver') { app.screen = 'gameOver'; app.timer = 0; }
+          }
+        }
+      } else if (app.screen === 'gameOver') {
+        R.step(app.game, {});
+        if (++app.timer >= BANNER_FRAMES) app.screen = 'title';
+      }
+      return events;
+    };
+
+    // True while the saucer sound should loop.
+    app.ufoSound = function () {
+      return app.screen === 'play' && !app.paused && !!app.game && (app.game.sound3 & 1) === 1;
+    };
+
+    // True while game sound must be held (pause).
+    app.audioPaused = function () { return app.screen === 'play' && app.paused; };
+
+    app.render = function (fb) {
+      if (app.screen === 'title') {
+        V.clear(fb);
+        V.hud(fb, { score: app.game ? app.game.score : 0, hi: app.hiScore() });
+        if ((app.frame >> 5) & 1) V.centered(fb, 'PRESS ENTER', 128);
+        return;
+      }
+      V.renderPlay(fb, app.game, { hi: app.hiScore(), label: app.paused ? 'PAUSE' : '' });
+    };
+
+    return app;
+  }
+
+  return { KEY_MAP: KEY_MAP, FOOTER_KEYS: FOOTER_KEYS, createApp: createApp, BANNER_FRAMES: BANNER_FRAMES };
+})();
 /* ==END LOGIC== */
 </script>
 <script>
@@ -1707,21 +1865,94 @@ var ARCADE_PLATFORM = (function () {
 })();
 
 /* ===== PLATFORM ===== */
+var PLATFORM = (function () {
+  'use strict';
+  var V = SI.VIEW, W = V.W, H = V.H;
+
+  // Framebuffer -> 224 x 256 ImageData -> integer-scaled canvas. CSS
+  // stretches the small remainder with image-rendering: pixelated (S3).
+  function createScreen(canvas) {
+    var off = document.createElement('canvas');
+    off.width = W; off.height = H;
+    var offCtx = off.getContext('2d');
+    var image = offCtx.createImageData(W, H);
+    var ctx = canvas.getContext('2d');
+    var fb = V.createFramebuffer();
+
+    function resize(cssW, cssH, dpr) {
+      var k = Math.max(1, Math.floor(Math.min(cssW * dpr / W, cssH * dpr / H)));
+      if (canvas.width !== W * k) { canvas.width = W * k; canvas.height = H * k; }
+    }
+
+    function present() {
+      var d = image.data;
+      for (var i = 0; i < fb.length; i++) {
+        var v = fb[i] ? 255 : 0, j = i * 4;
+        d[j] = v; d[j + 1] = v; d[j + 2] = v; d[j + 3] = 255;
+      }
+      offCtx.putImageData(image, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+    }
+
+    return { fb: fb, resize: resize, present: present };
+  }
+
+  // Sound effects (I12). Pitches are chosen by ear (plan R10). The march
+  // plays 4 low tones in turn, each about 4 ticks long (1767).
+  var MARCH_HZ = [98, 87, 78, 69];
+
+  function playEvents(audio, events) {
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      if (e.type === 'march') audio.tone(MARCH_HZ[e.tone & 3], 70, { gain: 0.25 });
+      else if (e.type === 'shot') audio.noise(260, { filter: 3500, gain: 0.12 });
+      else if (e.type === 'alienHit') audio.tone(320, 110, { endFreq: 60, gain: 0.18, decay: true });
+      else if (e.type === 'playerHit') audio.noise(900, { filter: 700, gain: 0.3 });
+      else if (e.type === 'saucerHit') audio.tone(1200, 500, { endFreq: 150, gain: 0.12, decay: true });
+      else if (e.type === 'extraLife') audio.tone(880, 300, { gain: 0.1 });
+    }
+  }
+
+  return { createScreen: createScreen, playEvents: playEvents, MARCH_HZ: MARCH_HZ };
+})();
+
 /* ===== BOOT ===== */
 (function () {
   'use strict';
   var canvas = document.getElementById('screen');
-  var ctx = canvas.getContext('2d');
-  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, 224, 256, function () {});
+  var screen = PLATFORM.createScreen(canvas);
+  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, SI.CONST.SCREEN_W, SI.CONST.SCREEN_H,
+    function (w, h, dpr) { screen.resize(w, h, dpr); });
   var footer = ARCADE_PLATFORM.createFooter(document.getElementById('keys'),
     document.getElementById('sound'), document.getElementById('notice'));
-  var store = ARCADE.createStore(function () { return window.localStorage; }, 'spaceinvaders.v1.');
-  var soundOn = store.load('sound', ARCADE.validateSound, function () { return true; });
-  ARCADE_PLATFORM.startLoop(60, function () {}, function () {
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    footer([['\u2190 \u2192', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'START/PAUSE'], ['M', 'SOUND']], soundOn, store.ok);
+  var store = ARCADE.createStore(function () { return window.localStorage; }, SI.CONST.STORAGE_PREFIX);
+  var app = SI.APP.createApp({ store: store });
+  var input = ARCADE.createInput(SI.APP.KEY_MAP);
+  var audio = ARCADE_PLATFORM.createAudio();
+  window.addEventListener('keydown', function () { audio.unlock(); }, true);
+  var ticker = ARCADE_PLATFORM.startLoop(SI.CONST.FPS, function () {
+    var events = app.step(input.frame());
+    audio.setMuted(!app.soundOn);
+    audio.setPaused(app.audioPaused());
+    PLATFORM.playEvents(audio, events);
+    if (app.ufoSound()) audio.loop('ufo', 450, { lfoHz: 7, lfoDepth: 180, gain: 0.06 });
+    else audio.stopLoop('ufo');
+  }, function () {
+    app.render(screen.fb);
+    screen.present();
+    footer(SI.APP.FOOTER_KEYS, app.soundOn, store.ok);
   });
+  ARCADE_PLATFORM.bindInput(input, function () {
+    input.clear();
+    app.pause();
+    audio.setPaused(true);
+  }, function () {
+    ticker.reset();
+    audio.setPaused(app.audioPaused());
+  });
+  // Read-only handle for end-to-end tests.
+  window.siApp = app;
 })();
 </script>
 </body>
