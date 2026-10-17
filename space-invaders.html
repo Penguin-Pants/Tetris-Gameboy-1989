@@ -1,0 +1,2081 @@
+<!DOCTYPE html>
+<!--
+  Space Invaders (1978 arcade), one player. One offline file.
+  Private use only.
+
+  Sections (in order):
+    HEAD/CSS          styles (white on black only)
+    DOM               stage, canvas and footer
+    ARCADE            shared logic (same copy in pong.html and space-invaders.html)
+    CONST             fixed numbers (requirements and sources)
+    RULES             pure game engine
+    DATA              art and text
+    VIEW              pure renderer
+    APP               pure screen state machine
+    ARCADE PLATFORM   shared browser layer (same copy in both games)
+    PLATFORM          drawing for this game
+    BOOT              start-up
+
+  ARCADE to APP sit between the LOGIC markers. They use no DOM, storage or
+  audio. Node tests load that block with tests/helpers/load-arcade.mjs.
+
+  Tests:
+    npm test           unit tests (node:test, no packages)
+    npm run test:e2e   Playwright end-to-end tests (dev only)
+
+  Plan: docs/arcade-build-plan.md. Requirements: docs/arcade-requirements.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPACE INVADERS</title>
+<style>
+/* ===== HEAD/CSS ===== */
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff; }
+body { display: flex; flex-direction: column; font-family: "Courier New", Courier, monospace; }
+#stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+#screen { display: block; background: #000; image-rendering: pixelated; image-rendering: crisp-edges; }
+#footer {
+  flex: none; display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+  gap: 2px 16px; padding: 6px 10px; border-top: 1px solid #fff; background: #000; font-size: 13px; line-height: 1.35;
+}
+#footer kbd { font-family: inherit; font-weight: 700; }
+#keys { display: contents; }
+#footer .item, #sound { white-space: nowrap; }
+#notice { margin: 0; font-weight: 700; white-space: nowrap; }
+#notice[hidden] { display: none; }
+</style>
+</head>
+<body>
+<!-- ===== DOM ===== -->
+<main id="stage"><canvas id="screen" width="224" height="256" aria-label="Space Invaders game screen"></canvas></main>
+<footer id="footer"><span id="keys"></span><span id="sound"></span><p id="notice" hidden>Scores not saved</p></footer>
+
+<script>
+/* ==BEGIN LOGIC== */
+/* ===== ARCADE ===== */
+// Shared logic. pong.html and space-invaders.html hold the same copy of this
+// section. tests/unit/arcade-common.test.mjs runs one suite against each file.
+var ARCADE = (function () {
+  'use strict';
+
+  function has(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+  // Fixed-timestep accumulator (copy of the Tetris ticker). advance(nowMs)
+  // returns how many game frames to run. Catch-up is capped; when the cap is
+  // hit (for example after a tab restore) the rest of the backlog is dropped.
+  function createTicker(fps, maxSteps) {
+    var stepMs = 1000 / fps;
+    var cap = maxSteps || 5;
+    var acc = 0, last = null;
+    return {
+      advance: function (now) {
+        if (last === null) { last = now; return 0; }
+        var dt = Math.max(0, now - last);
+        last = now;
+        acc += dt;
+        var n = Math.floor(acc / stepMs);
+        if (n > cap) { n = cap; acc = 0; } else { acc -= n * stepMs; }
+        return n;
+      },
+      reset: function () { acc = 0; last = null; }
+    };
+  }
+
+  // ---- Input. keyMap maps KeyboardEvent.code to an action name; several
+  // codes may share an action. OS key repeat is ignored. Ctrl, Alt and Meta
+  // combinations are ignored (requirements S4).
+  function createInput(keyMap) {
+    var codes = Object.keys(keyMap);
+    var actions = [];
+    codes.forEach(function (c) { if (actions.indexOf(keyMap[c]) < 0) actions.push(keyMap[c]); });
+    var down = {};     // code -> true while held
+    var pressed = {};  // code -> true, pressed since the last frame
+
+    // e: { code, repeat, ctrlKey, altKey, metaKey }. Returns true when the
+    // page should call preventDefault.
+    function keyDown(e) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      var known = has(keyMap, e.code);
+      if (e.repeat) return known;
+      down[e.code] = true;
+      pressed[e.code] = true;
+      return known;
+    }
+
+    function keyUp(e) {
+      delete down[e.code];
+      return has(keyMap, e.code);
+    }
+
+    function clear() { down = {}; pressed = {}; }
+
+    // Snapshot for one game frame. A tap that started and ended inside the
+    // frame still counts as held for that frame.
+    function frame() {
+      var held = {}, edge = {};
+      actions.forEach(function (a) { held[a] = false; edge[a] = false; });
+      codes.forEach(function (c) {
+        var a = keyMap[c];
+        if (pressed[c]) edge[a] = true;
+        if (down[c] || pressed[c]) held[a] = true;
+      });
+      pressed = {};
+      return { held: held, pressed: edge };
+    }
+
+    return { keyDown: keyDown, keyUp: keyUp, clear: clear, frame: frame };
+  }
+
+  // ---- Storage adapter. getBackend returns a localStorage-like object and
+  // may throw. Any error after the probe, and any corrupt value (bad JSON or
+  // a validator that returns null), drops the backend for the session: ok
+  // becomes false and later loads and saves use memory only (requirements S10).
+  // A corrupt value is removed first, so the next session starts clean.
+  function createStore(getBackend, prefix) {
+    var store = { ok: true };
+    var memory = {};
+    var backend = null;
+    try {
+      backend = getBackend();
+      var probe = prefix + 'probe';
+      backend.setItem(probe, '1');
+      backend.removeItem(probe);
+    } catch (e) {
+      backend = null;
+      store.ok = false;
+    }
+
+    function fail() { backend = null; store.ok = false; }
+
+    store.load = function (name, validate, fallback) {
+      var raw = null;
+      if (backend) {
+        try { raw = backend.getItem(prefix + name); } catch (e) { fail(); }
+      }
+      if (!backend) raw = has(memory, name) ? memory[name] : null;
+      if (raw === null || raw === undefined) return fallback();
+      var value = null;
+      try { value = validate(JSON.parse(raw)); } catch (e) { value = null; }
+      if (value === null) {
+        // Remove the corrupt value so a later session can save again.
+        if (backend) { try { backend.removeItem(prefix + name); } catch (e) { /* drop below */ } }
+        fail();
+        return fallback();
+      }
+      return value;
+    };
+
+    store.save = function (name, value) {
+      var text = JSON.stringify(value);
+      memory[name] = text;
+      if (!backend) return false;
+      try {
+        backend.setItem(prefix + name, text);
+        return true;
+      } catch (e) {
+        fail();
+        return false;
+      }
+    };
+
+    return store;
+  }
+
+  // ---- Top 10 (requirements S6 to S8). Entry: { name: 3 letters A-Z, score }.
+  var MAX_ENTRIES = 10;
+  var NAME_LEN = 3;
+  var LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+  function validName(n) { return typeof n === 'string' && /^[A-Z]{3}$/.test(n); }
+
+  function validScore(v, maxScore) {
+    return typeof v === 'number' && Math.floor(v) === v && v >= 1 && v <= maxScore;
+  }
+
+  // Returns a clean copy, or null when anything is invalid: not an array,
+  // more than 10 entries, a bad entry or an order that is not highest first.
+  function validateScores(raw, maxScore) {
+    if (!Array.isArray(raw) || raw.length > MAX_ENTRIES) return null;
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var e = raw[i];
+      if (!e || typeof e !== 'object' || !validName(e.name) || !validScore(e.score, maxScore)) return null;
+      if (i > 0 && e.score > out[i - 1].score) return null;
+      out.push({ name: e.name, score: e.score });
+    }
+    return out;
+  }
+
+  // Above 0, and fewer than 10 entries or above the 10th (S8).
+  function qualifies(list, score) {
+    if (!(score > 0)) return false;
+    return list.length < MAX_ENTRIES || score > list[MAX_ENTRIES - 1].score;
+  }
+
+  // Rank (0-based) a new score takes. Ties rank below older equal scores.
+  function rankOf(list, score) {
+    var i = 0;
+    while (i < list.length && list[i].score >= score) i++;
+    return i;
+  }
+
+  function insertScore(list, entry) {
+    var out = list.slice();
+    var r = rankOf(out, entry.score);
+    out.splice(r, 0, { name: entry.name, score: entry.score });
+    return { list: out.slice(0, MAX_ENTRIES), rank: r };
+  }
+
+  // ---- Name entry (S7). 3 slots, each starts at A. prevAction and
+  // nextAction change the letter (wrapping A to Z and Z to A). Start accepts
+  // the slot; after slot 3 step() returns the name.
+  function createNameEntry(prevAction, nextAction) {
+    var ne = { letters: ['A', 'A', 'A'], slot: 0 };
+
+    function shift(ch, dir) {
+      var i = LETTERS.indexOf(ch);
+      return LETTERS[(i + dir + LETTERS.length) % LETTERS.length];
+    }
+
+    ne.step = function (inp) {
+      var p = inp.pressed;
+      if (p.start) {
+        if (ne.slot === NAME_LEN - 1) return ne.letters.join('');
+        ne.slot++;
+        return null;
+      }
+      if (p[nextAction]) ne.letters[ne.slot] = shift(ne.letters[ne.slot], 1);
+      else if (p[prevAction]) ne.letters[ne.slot] = shift(ne.letters[ne.slot], -1);
+      return null;
+    };
+
+    return ne;
+  }
+
+  // Sound setting: a boolean, else null (corrupt).
+  function validateSound(raw) { return typeof raw === 'boolean' ? raw : null; }
+
+  return {
+    createTicker: createTicker, createInput: createInput, createStore: createStore,
+    MAX_ENTRIES: MAX_ENTRIES, NAME_LEN: NAME_LEN, LETTERS: LETTERS,
+    validName: validName, validateScores: validateScores, qualifies: qualifies,
+    rankOf: rankOf, insertScore: insertScore, createNameEntry: createNameEntry,
+    validateSound: validateSound
+  };
+})();
+
+var SI = {};
+
+/* ===== CONST ===== */
+// Numbers come from the requirements (docs/arcade-requirements.md, 3.3) or
+// from the ROM disassembly by Mikael Agren (computerarcheology.com,
+// Arcade/SpaceInvaders/Code.html). Hex addresses in comments are ROM
+// addresses. Values stay in ROM units: Xr runs left to right, Yr runs bottom
+// to top, and a pixel number is Xr * 256 + Yr.
+SI.CONST = (function () {
+  'use strict';
+  return {
+    FPS: 60,                    // Video interrupts at lines 96 and 224, 60 Hz (Hardware.html)
+    SCREEN_W: 224,
+    SCREEN_H: 256,
+    STORAGE_PREFIX: 'spaceinvaders.v1.',
+    MAX_SCORE: 9999,            // I11 (default): the score caps
+    START_SHIPS: 3,             // I3; GetShipsPerCred 08D1 with DIP 0
+    EXTRA_SHIP_MSB: 15,         // I3: 1,500 (0935, score MSB 0x15)
+    ROWS: 5,
+    COLS: 11,
+    ALIENS: 55,                 // I1; InitAliens 01C0
+    ALIEN_POINTS: [10, 10, 20, 20, 30],   // I2; AlienScoreValue 097C, row 0 at the bottom
+    RACK_START_YR: 0x78,        // First rack (07EA)
+    RACK_START_XR: 0x38,        // 07EA and 0A1E
+    // Racks 2 to 9; index (rackCnt AND 7) + 1 (0A0C), so rack 10 repeats 0x60.
+    RACK_YR_TABLE: [0x60, 0x50, 0x48, 0x48, 0x48, 0x40, 0x40, 0x40],   // 1DA3, owner decision O2
+    RACK_DOWN: -8,              // rackDownDelta F8 (mirror 200E)
+    INVADED_YR: 0x28,           // An alien below this Yr ends the game (016B)
+    PLAYER_YR: 0x20,            // Mirror 201A
+    PLAYER_XR: 0x30,            // Mirror 201B
+    PLAYER_XR_MIN: 0x30,        // 038F
+    PLAYER_XR_MAX: 0xD9,        // 0382
+    PLAYER_START_DELAY: 0x80,   // Player task timer (mirror 2011)
+    PLAYER_BLOW_STEPS: 12,      // expAnimateCnt (mirror 2017)
+    PLAYER_BLOW_TICKS: 5,       // expAnimateTimer (02A7)
+    ALIEN_FIRE_DELAY: 0x30,     // alienFireDelay (02A1)
+    SHOT_YR: 0x28,              // Player shot start (mirror 2029)
+    SHOT_DY: 4,                 // shotDeltaX (mirror 202C)
+    SHOT_TOP_YR: 0xD8,          // Miss at the top (14E4)
+    SAUCER_HIT_YR: 0xCE,        // A hit above this Yr is the saucer (14F0)
+    SHOT_BLOW_TICKS: 0x10,      // blowUpTimer (mirror 2026)
+    ALIEN_BLOW_TICKS: 0x10,     // expAlienTimer (152A)
+    SHIELD_XR: [0x40, 0x6D, 0x9A, 0xC7],  // 0224 and +0x2E0 per shield (023A)
+    SHIELD_YR: 0x30,            // Screen byte 6 (0224)
+    BOTTOM_LINE_YR: 16,         // DrawBottomLine 01CF
+    EDGE_RIGHT_XR: 0xF5,        // RackBump 159E: screen 3EA4
+    EDGE_LEFT_XR: 0x29,         // RackBump 15B7: screen 2524
+    // Fleet sound (1775): first count not above the live aliens gives the delay.
+    FLEET_COUNTS: [0x32, 0x2B, 0x24, 0x1C, 0x16, 0x11, 0x0D, 0x0A, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01],
+    FLEET_DELAYS: [0x34, 0x2E, 0x27, 0x22, 0x1C, 0x18, 0x15, 0x13, 0x10, 0x0E, 0x0D, 0x0C, 0x0B, 0x09, 0x07, 0x05],
+    FLEET_HOLD: 4,              // fleetSndHold (1767)
+    // Column-firing table (ColFireTable 1D00): plunger uses 0x00-0x0F,
+    // squiggly uses 0x06-0x14 (04DC, 0529).
+    COL_TABLE: [0x01, 0x07, 0x01, 0x01, 0x01, 0x04, 0x0B, 0x01, 0x06, 0x03, 0x01, 0x01, 0x0B, 0x09, 0x02, 0x08,
+      0x02, 0x0B, 0x04, 0x07, 0x0A],
+    PLUNGER_WRAP: 0x10,
+    SQUIGGLY_START: 0x06,
+    SQUIGGLY_WRAP: 0x15,
+    SHOT_END_YR: 0x15,          // An alien shot below this Yr ends (05F6)
+    PLAYER_HIT_LO: 0x1E,        // A hit in Yr 0x1E-0x26 strikes the player (0603, 0608)
+    PLAYER_HIT_HI: 0x27,
+    SHOT_BLOW_COUNT: 4,         // aShotBlowCnt (mirror 203A)
+    // Saucer (SaucerScrTab 1D54, first 15 entries; the 044C wrap is kept for I7).
+    SAUCER_SCORES: [100, 50, 50, 100, 150, 100, 100, 50, 300, 100, 100, 100, 50, 150, 100],
+    SAUCER_TIME: 0x0600,        // tillSaucer (0921)
+    SAUCER_YR: 0xD0,            // Mirror 2089
+    SAUCER_XR: 0x29,            // Mirror 208A
+    SAUCER_MIN_ALIENS: 8,       // 06A1
+    SAUCER_HIT_TIME: 0x20,      // Mirror 2086
+    PROMPT_TICKS: 0xB0,         // PromptPlayer 08A4
+    RACK_END_TICKS: 0x30,       // 0A42
+    LETTER_TICKS: 7             // PrintMessageDel 0A99
+  };
+})();
+
+/* ===== DATA ===== */
+// Art is redrawn by eye at the ROM sizes (plan decision 15). No ROM bitmap
+// bytes are copied. Each picture is drawn the way it shows on the screen
+// ('*' is a lit pixel) and converted to ROM-style column bytes: one byte per
+// Xr column, bit 0 at the lowest Yr.
+SI.DATA = (function () {
+  'use strict';
+
+  // 8 rows of art -> one byte per column (row 0 is the top, bit 7).
+  function columns(rows) {
+    var out = [];
+    for (var x = 0; x < rows[0].length; x++) {
+      var b = 0;
+      for (var r = 0; r < 8; r++) if (rows[r][x] === '*') b |= 1 << (7 - r);
+      out.push(b);
+    }
+    return out;
+  }
+
+  // Pads art on the left and right to the ROM sprite width.
+  function pad(rows, left, width) {
+    return rows.map(function (r) {
+      var s = new Array(left + 1).join('.') + r;
+      while (s.length < width) s += '.';
+      return s;
+    });
+  }
+
+  // ---- Aliens: 16 columns x 8 rows (DrawAlien 0131). Index by type:
+  // 0 = bottom two rows (10 pts), 1 = middle two rows (20), 2 = top row (30).
+  var ALIEN_ART = [
+    [[ // Type A, 12 wide
+      '....****....',
+      '.**********.',
+      '************',
+      '***..**..***',
+      '************',
+      '...**..**...',
+      '..**.**.**..',
+      '**........**'
+    ], [
+      '....****....',
+      '.**********.',
+      '************',
+      '***..**..***',
+      '************',
+      '..***..***..',
+      '.**..**..**.',
+      '..**....**..'
+    ], 2],
+    [[ // Type B, 11 wide
+      '..*.....*..',
+      '...*...*...',
+      '..*******..',
+      '.**.***.**.',
+      '***********',
+      '*.*******.*',
+      '*.*.....*.*',
+      '...**.**...'
+    ], [
+      '..*.....*..',
+      '*..*...*..*',
+      '*.*******.*',
+      '***.***.***',
+      '***********',
+      '.*********.',
+      '..*.....*..',
+      '.*.......*.'
+    ], 3],
+    [[ // Type C, 8 wide
+      '...**...',
+      '..****..',
+      '.******.',
+      '**.**.**',
+      '********',
+      '..*..*..',
+      '.*.**.*.',
+      '*.*..*.*'
+    ], [
+      '...**...',
+      '..****..',
+      '.******.',
+      '**.**.**',
+      '********',
+      '.*.**.*.',
+      '*......*',
+      '.*....*.'
+    ], 4]
+  ];
+  var ALIENS = ALIEN_ART.map(function (a) {
+    return [columns(pad(a[0], a[2], 16)), columns(pad(a[1], a[2], 16))];
+  });
+
+  var ALIEN_EXPLOSION = columns(pad([
+    '....*...*....',
+    '.*...*.*...*.',
+    '..*.......*..',
+    '...*.....*...',
+    '**.........**',
+    '...*.....*...',
+    '..*..*.*..*..',
+    '.*..*...*..*.'
+  ], 1, 16));
+
+  // ---- Player: 16 columns x 8 rows, 13 wide (PlayerSprite 1C60 size).
+  var PLAYER = columns(pad([
+    '......*......',
+    '.....***.....',
+    '.....***.....',
+    '.***********.',
+    '*************',
+    '*************',
+    '*************',
+    '*************'
+  ], 2, 16));
+
+  var PLAYER_BLOWUP = [columns(pad([
+    '.....*.......',
+    '..*.......*..',
+    '.....*.*.....',
+    '*..*.***...*.',
+    '...*******...',
+    '.*********.*.',
+    '*************',
+    '.***********.'
+  ], 2, 16)), columns(pad([
+    '...*....*....',
+    '*.....*...*..',
+    '..*.*......*.',
+    '....*..*.....',
+    '.*.*****.*...',
+    '..*******..*.',
+    '.***********.',
+    '*************'
+  ], 2, 16))];
+
+  // ---- Player shot: 1 column, 4 pixels (1C90 size). Explosion: 8 x 8 (1C91).
+  var SHOT = columns(['.', '.', '.', '.', '*', '*', '*', '*']);
+  var SHOT_EXPLOSION = columns([
+    '*..**..*',
+    '..****..',
+    '.******.',
+    '*.****.*',
+    '.******.',
+    '..****..',
+    '.*.**.*.',
+    '*..**..*'
+  ]);
+
+  // ---- Alien shots: 4 frames of 3 columns. Explosion: 6 columns (1CDC size).
+  function frames(list) { return list.map(columns); }
+  var ROLLING = frames([
+    ['.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '...'],
+    ['.*.', '.**', '.*.', '.*.', '**.', '.*.', '.*.', '...'],
+    ['.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '.*.', '...'],
+    ['.*.', '**.', '.*.', '.*.', '.**', '.*.', '.*.', '...']
+  ]);
+  var PLUNGER = frames([
+    ['.*.', '.*.', '.*.', '.*.', '.*.', '***', '...', '...'],
+    ['.*.', '.*.', '.*.', '***', '.*.', '.*.', '...', '...'],
+    ['.*.', '.*.', '***', '.*.', '.*.', '.*.', '...', '...'],
+    ['***', '.*.', '.*.', '.*.', '.*.', '.*.', '...', '...']
+  ]);
+  var SQUIGGLY = frames([
+    ['.*.', '*..', '.*.', '..*', '.*.', '*..', '.*.', '...'],
+    ['*..', '.*.', '..*', '.*.', '*..', '.*.', '..*', '...'],
+    ['.*.', '..*', '.*.', '*..', '.*.', '..*', '.*.', '...'],
+    ['..*', '.*.', '*..', '.*.', '..*', '.*.', '*..', '...']
+  ]);
+  var ALIEN_SHOT_EXPLOSION = columns([
+    '.*..*.',
+    '*.**..',
+    '.****.',
+    '******',
+    '.****.',
+    '*.**.*',
+    '.*..*.',
+    '......'
+  ]);
+
+  // ---- Saucer: 24 columns (SpriteSaucer 1D64 size), 16 wide in the middle.
+  var SAUCER = columns(pad([
+    '.....******.....',
+    '...**********...',
+    '..************..',
+    '.**.**.**.**.**.',
+    '****************',
+    '..***..**..***..',
+    '...*........*...',
+    '................'
+  ], 4, 24));
+  var SAUCER_EXPLOSION = columns(pad([
+    '..*....*..*...*....*..',
+    '*...*.....*......*...*',
+    '..*...*.*****.*...*...',
+    '....*.**********......',
+    '.*...**.**.**.**..*...',
+    '...*..*********...*..*',
+    '..*.....*.*.*.......*.',
+    '*....*..........*.....'
+  ], 1, 24));
+
+  // ---- Shield: 22 columns x 16 rows (ShieldImage 1D20 size). Two bytes per
+  // column in screen-memory order: Yr 48-55 first, then Yr 56-63.
+  var SHIELD_ART = [
+    '....**************....',
+    '...****************...',
+    '..******************..',
+    '.********************.',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '**********************',
+    '*******........*******',
+    '******..........******',
+    '*****............*****',
+    '*****............*****'
+  ];
+  var SHIELD = (function () {
+    var lo = columns(SHIELD_ART.slice(8)), hi = columns(SHIELD_ART.slice(0, 8));
+    var out = [];
+    for (var x = 0; x < lo.length; x++) out.push(lo[x], hi[x]);
+    return out;
+  })();
+
+  // ---- Font: 8 x 8 cells, glyphs 5 x 7 (DrawChar 08FF uses 8-byte cells).
+  var GLYPHS = {
+    'A': ['.***.', '*...*', '*...*', '*****', '*...*', '*...*', '*...*'],
+    'B': ['****.', '*...*', '*...*', '****.', '*...*', '*...*', '****.'],
+    'C': ['.***.', '*...*', '*....', '*....', '*....', '*...*', '.***.'],
+    'D': ['****.', '*...*', '*...*', '*...*', '*...*', '*...*', '****.'],
+    'E': ['*****', '*....', '*....', '****.', '*....', '*....', '*****'],
+    'F': ['*****', '*....', '*....', '****.', '*....', '*....', '*....'],
+    'G': ['.***.', '*...*', '*....', '*.***', '*...*', '*...*', '.***.'],
+    'H': ['*...*', '*...*', '*...*', '*****', '*...*', '*...*', '*...*'],
+    'I': ['.***.', '..*..', '..*..', '..*..', '..*..', '..*..', '.***.'],
+    'J': ['....*', '....*', '....*', '....*', '....*', '*...*', '.***.'],
+    'K': ['*...*', '*..*.', '*.*..', '**...', '*.*..', '*..*.', '*...*'],
+    'L': ['*....', '*....', '*....', '*....', '*....', '*....', '*****'],
+    'M': ['*...*', '**.**', '*.*.*', '*.*.*', '*...*', '*...*', '*...*'],
+    'N': ['*...*', '**..*', '*.*.*', '*..**', '*...*', '*...*', '*...*'],
+    'O': ['.***.', '*...*', '*...*', '*...*', '*...*', '*...*', '.***.'],
+    'P': ['****.', '*...*', '*...*', '****.', '*....', '*....', '*....'],
+    'Q': ['.***.', '*...*', '*...*', '*...*', '*.*.*', '*..*.', '.**.*'],
+    'R': ['****.', '*...*', '*...*', '****.', '*.*..', '*..*.', '*...*'],
+    'S': ['.***.', '*...*', '*....', '.***.', '....*', '*...*', '.***.'],
+    'T': ['*****', '..*..', '..*..', '..*..', '..*..', '..*..', '..*..'],
+    'U': ['*...*', '*...*', '*...*', '*...*', '*...*', '*...*', '.***.'],
+    'V': ['*...*', '*...*', '*...*', '*...*', '*...*', '.*.*.', '..*..'],
+    'W': ['*...*', '*...*', '*...*', '*.*.*', '*.*.*', '**.**', '*...*'],
+    'X': ['*...*', '*...*', '.*.*.', '..*..', '.*.*.', '*...*', '*...*'],
+    'Y': ['*...*', '*...*', '.*.*.', '..*..', '..*..', '..*..', '..*..'],
+    'Z': ['*****', '....*', '...*.', '..*..', '.*...', '*....', '*****'],
+    '0': ['.***.', '*...*', '*..**', '*.*.*', '**..*', '*...*', '.***.'],
+    '1': ['..*..', '.**..', '..*..', '..*..', '..*..', '..*..', '.***.'],
+    '2': ['.***.', '*...*', '....*', '...*.', '..*..', '.*...', '*****'],
+    '3': ['*****', '....*', '...*.', '..**.', '....*', '*...*', '.***.'],
+    '4': ['...*.', '..**.', '.*.*.', '*..*.', '*****', '...*.', '...*.'],
+    '5': ['*****', '*....', '****.', '....*', '....*', '*...*', '.***.'],
+    '6': ['..**.', '.*...', '*....', '****.', '*...*', '*...*', '.***.'],
+    '7': ['*****', '....*', '...*.', '..*..', '.*...', '.*...', '.*...'],
+    '8': ['.***.', '*...*', '*...*', '.***.', '*...*', '*...*', '.***.'],
+    '9': ['.***.', '*...*', '*...*', '.****', '....*', '...*.', '.**..'],
+    '<': ['...*.', '..*..', '.*...', '*....', '.*...', '..*..', '...*.'],
+    '>': ['.*...', '..*..', '...*.', '....*', '...*.', '..*..', '.*...'],
+    '=': ['.....', '.....', '*****', '.....', '*****', '.....', '.....'],
+    '*': ['.....', '*.*.*', '.***.', '*****', '.***.', '*.*.*', '.....'],
+    '?': ['.***.', '*...*', '....*', '...*.', '..*..', '.....', '..*..'],
+    '-': ['.....', '.....', '.....', '*****', '.....', '.....', '.....'],
+    '.': ['.....', '.....', '.....', '.....', '.....', '.....', '..*..'],
+    ' ': ['.....', '.....', '.....', '.....', '.....', '.....', '.....']
+  };
+  var FONT = {};
+  Object.keys(GLYPHS).forEach(function (ch) {
+    FONT[ch] = columns(pad(GLYPHS[ch].concat(['.....']), 1, 8));
+  });
+
+  // ROM messages (Midway set, plan R4).
+  var TEXT = {
+    HEADER: ' SCORE<1> HI-SCORE SCORE<2> ',   // MessageScore 1AE4
+    PLAY_PLAYER: 'PLAY PLAYER<1>',            // MesssageP1 1B70
+    GAME_OVER: 'GAME OVER',                   // MessageGOver 1AA6 (first 9 letters)
+    PLAY: 'PLAY',                             // MessagePlayY 1DAB
+    INVADERS: 'SPACE  INVADERS',              // MessageInvaders 1DAF
+    ADVANCE: '*SCORE ADVANCE TABLE*',         // MessageAdv 1CA3
+    MYSTERY: '=? MYSTERY',                    // 1DE0
+    PTS30: '=30 POINTS',                      // 1DEA
+    PTS20: '=20 POINTS',                      // 1DF4
+    PTS10: '=10 POINTS',                      // 1C99
+    // Saucer score strings (SaucSoreStr 1D94).
+    SAUCER: { 50: ' 50', 100: '100', 150: '150', 300: '300' }
+  };
+
+  return {
+    columns: columns, ALIENS: ALIENS, ALIEN_EXPLOSION: ALIEN_EXPLOSION,
+    PLAYER: PLAYER, PLAYER_BLOWUP: PLAYER_BLOWUP, SHOT: SHOT, SHOT_EXPLOSION: SHOT_EXPLOSION,
+    ROLLING: ROLLING, PLUNGER: PLUNGER, SQUIGGLY: SQUIGGLY, ALIEN_SHOT_EXPLOSION: ALIEN_SHOT_EXPLOSION,
+    SAUCER: SAUCER, SAUCER_EXPLOSION: SAUCER_EXPLOSION, SHIELD: SHIELD, FONT: FONT, TEXT: TEXT
+  };
+})();
+
+/* ===== RULES ===== */
+// Pure port of the 1978 game logic. The engine owns a 1-bit copy of screen
+// memory (224 rows of 32 bytes, plan decision 4): collision, shield erosion
+// and aliens that overwrite shields all come from pixel tests on it, as in
+// the ROM. One step() is one 60 Hz frame: the mid-screen interrupt half
+// (8C), then the end-screen half (10), each followed by one pass of the main
+// game loop (081F).
+SI.RULES = (function () {
+  'use strict';
+  var C = SI.CONST, D = SI.DATA;
+
+  // ---- Screen memory. Row r is Xr = r + 0x20; byte k holds Yr 8k..8k+7.
+  var ROWS = 224, BYTES = 32;
+
+  // Pixel number (Xr, Yr) -> byte index (ConvToScr 1A47), or -1 when the
+  // address is outside screen memory.
+  function addr(xr, yr) {
+    var row = (xr & 0xFF) - 0x20;
+    if (row < 0 || row >= ROWS) return -1;
+    return row * BYTES + ((yr & 0xFF) >> 3);
+  }
+
+  function put(g, i, v) { if (i >= 0 && i < ROWS * BYTES) g.vram[i] = v; }
+  function get(g, i) { return i >= 0 && i < ROWS * BYTES ? g.vram[i] : 0; }
+
+  // A sprite byte moved up by Yr AND 7 (the hardware shift register).
+  function shifted(b, yr) { return (b << ((yr & 0xFF) & 7)) & 0xFFFF; }
+
+  // DrawShiftedSprite 1400: OR a shifted sprite.
+  function drawShifted(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      put(g, i, get(g, i) | (s & 0xFF));
+      if ((i & 31) < 31) put(g, i + 1, get(g, i + 1) | (s >> 8));
+    }
+  }
+
+  // EraseShifted 1452: AND NOT a shifted sprite.
+  function eraseShifted(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      put(g, i, get(g, i) & ~(s & 0xFF) & 0xFF);
+      if ((i & 31) < 31) put(g, i + 1, get(g, i + 1) & ~(s >> 8) & 0xFF);
+    }
+  }
+
+  // DrawSprCollision 1491: OR a shifted sprite; true when a pixel was lit.
+  function drawCollide(g, img, xr, yr) {
+    var hit = false;
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      if (get(g, i) & s & 0xFF) hit = true;
+      put(g, i, get(g, i) | (s & 0xFF));
+      if ((i & 31) < 31) {
+        if (get(g, i + 1) & (s >> 8)) hit = true;
+        put(g, i + 1, get(g, i + 1) | (s >> 8));
+      }
+    }
+    return hit;
+  }
+
+  // DrawSprite 15D3: overwrite two bytes per row with the shifted sprite.
+  // Aliens drawn this way clear shield pixels under them.
+  function drawOver(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) {
+      var i = addr(xr + c, yr), s = shifted(img[c], yr);
+      if (i < 0) continue;
+      put(g, i, s & 0xFF);
+      if ((i & 31) < 31) put(g, i + 1, s >> 8);
+    }
+  }
+
+  // DrawSimpSprite 1439: overwrite one byte per row, no shift.
+  function drawSimple(g, img, xr, yr) {
+    for (var c = 0; c < img.length; c++) put(g, addr(xr + c, yr), img[c]);
+  }
+
+  // EraseSimpleSprite 1424: clear two bytes per row.
+  function eraseSimple(g, n, xr, yr) {
+    for (var c = 0; c < n; c++) {
+      var i = addr(xr + c, yr);
+      if (i < 0) continue;
+      put(g, i, 0);
+      if ((i & 31) < 31) put(g, i + 1, 0);
+    }
+  }
+
+  // ClearSmallSprite 14CB: clear one byte per row.
+  function clearSmall(g, n, xr, yr) {
+    for (var c = 0; c < n; c++) put(g, addr(xr + c, yr), 0);
+  }
+
+  function printText(g, text, xr, yr) {
+    for (var k = 0; k < text.length; k++) drawSimple(g, D.FONT[text[k]] || D.FONT[' '], xr + 8 * k, yr);
+  }
+
+  // ClearPlayField 09D6: clear bytes 2 to 27 of every row (Yr 16 to 223).
+  function clearPlayField(g) {
+    for (var r = 0; r < ROWS; r++) for (var k = 2; k < 28; k++) g.vram[r * BYTES + k] = 0;
+  }
+
+  // DrawBottomLine 01CF: byte 0x01 at Yr 16 in every row.
+  function drawBottomLine(g) {
+    for (var r = 0; r < ROWS; r++) g.vram[r * BYTES + (C.BOTTOM_LINE_YR >> 3)] = 0x01;
+  }
+
+  // RestoreShields 1A69: OR the 4 shield pictures onto the screen.
+  function drawShields(g) {
+    for (var s = 0; s < 4; s++) {
+      for (var c = 0; c < 22; c++) {
+        var i = addr(C.SHIELD_XR[s] + c, C.SHIELD_YR);
+        g.vram[i] |= D.SHIELD[c * 2];
+        g.vram[i + 1] |= D.SHIELD[c * 2 + 1];
+      }
+    }
+  }
+
+  // ---- Rack geometry.
+  // GetAlienCoords 017A: index -> { yr, xr, row }. Rows are 16 apart in Yr
+  // and columns 16 apart in Xr from the reference (bottom-left) alien.
+  function alienCoords(g, idx) {
+    var row = Math.floor(idx / C.COLS), col = idx % C.COLS;
+    return { yr: (g.refYr + 16 * row) & 0xFF, xr: (g.refXr + 16 * col) & 0xFF, row: row };
+  }
+
+  // Cnt16s 1554 without the WrapRef bug (plan: fix CodeBug1): the number of
+  // 16-pixel steps from ref up to target, at least 1.
+  function steps16(ref, target) {
+    var n = Math.ceil((target - ref) / 16);
+    return n < 1 ? 1 : n;
+  }
+
+  // FindColumn 156F: 1-based column over Xr.
+  function findColumn(g, xr) { return steps16(g.refXr, xr); }
+
+  // AlienScoreValue 097C.
+  function alienPoints(row) { return C.ALIEN_POINTS[row]; }
+
+  // FleetDelayExShip 1775: delay for the live alien count.
+  function fleetDelay(n) {
+    for (var i = 0; i < C.FLEET_COUNTS.length; i++) if (n >= C.FLEET_COUNTS[i]) return C.FLEET_DELAYS[i];
+    return C.FLEET_DELAYS[C.FLEET_DELAYS.length - 1];
+  }
+
+  // ---- Sounds. Port 3 bits (SoundBits3On 18FA) and port 5 bits (fleet and
+  // saucer hit). Rising edges become events for the platform.
+  var SND = { UFO: 0x01, SHOT: 0x02, PLAYER_HIT: 0x04, ALIEN_HIT: 0x08, EXTRA: 0x10 };
+  var SND_EVENT = { 2: 'shot', 4: 'playerHit', 8: 'alienHit', 16: 'extraLife' };
+
+  function soundOn(g, bits) {
+    var rise = bits & ~g.sound3;
+    g.sound3 |= bits;
+    for (var b = 2; b <= 16; b <<= 1) if (rise & b) g.events.push({ type: SND_EVENT[b] });
+  }
+  function soundOff(g, mask) { g.sound3 &= mask; }
+
+  // ---- RAM mirror (CopyRAMMirror 01E4, data at 1B00).
+  function mirrorPlayer(g) {
+    g.obj[0] = { timer: C.PLAYER_START_DELAY, extra: 0 };
+    g.playerAlive = 0xFF;
+    g.expTimer = C.PLAYER_BLOW_TICKS;
+    g.expCount = C.PLAYER_BLOW_STEPS;
+    g.playerImg = D.PLAYER;
+    g.playerYr = C.PLAYER_YR;
+    g.playerXr = C.PLAYER_XR;
+  }
+
+  function mirrorShot(g) {
+    g.shot = { status: 0, timer: C.SHOT_BLOW_TICKS, img: D.SHOT, yr: C.SHOT_YR, xr: 0x30 };
+  }
+
+  function copyRamMirror(g) {
+    g.waitOnDraw = 1;
+    g.alienExploding = 0;
+    g.expAlienTimer = C.ALIEN_BLOW_TICKS;
+    g.alienRow = 0;
+    g.alienFrame = 0;
+    g.alienIndex = 0;
+    g.refDY = 0;
+    g.refDX = 2;
+    g.refYr = C.RACK_START_YR;
+    g.refXr = C.RACK_START_XR;
+    g.alienPosYr = C.RACK_START_YR;
+    g.alienPosXr = C.RACK_START_XR;
+    g.rackDirection = 0;
+    g.obj = [null, { timer: 0, extra: 0 }, { timer: 0, extra: 2 }, { timer: 0, extra: 0 }, { timer: 0, extra: 0 }];
+    mirrorPlayer(g);
+    mirrorShot(g);
+    g.fireBounce = 0;
+    g.rol = alienShot('rolling');
+    g.plu = alienShot('plunger');
+    g.squ = alienShot('squiggly');
+    mirrorSaucer(g);
+    g.sauScoreIdx = 0;          // 208D -> 1D54
+    g.shotCount = 0;            // 208F
+    g.tillSaucer = C.SAUCER_TIME;
+    g.expAlienYr = 0;
+    g.expAlienXr = 0;
+    g.playerOK = 1;
+    g.enableAlienFire = 0;
+    g.alienFireDelay = C.ALIEN_FIRE_DELAY;
+    g.invaded = 0;
+    g.skipPlunger = 0;
+    g.shotSync = 1;
+    g.numAliens = 0xFF;
+    g.alienShotDelta = -4;      // 207E
+    g.sound3 = 0;               // 2094
+    g.changeFleet = 1;          // 2095
+    g.fleetCount = 0x40;        // 2096
+    g.fleetReload = 0;          // 2097
+    g.fleetTone = 0;            // 2098 bit 0 (tone 1)
+  }
+
+  // Alien shot structures (mirror 1B35, 1B45, 1B55).
+  function alienShot(kind) {
+    var frames = kind === 'rolling' ? D.ROLLING : kind === 'plunger' ? D.PLUNGER : D.SQUIGGLY;
+    return {
+      kind: kind, status: 0, steps: 0, track: kind === 'rolling' ? 0 : 1,
+      // Rolling: 0 makes the shot skip its first try (047D). Others: table index.
+      cfir: kind === 'squiggly' ? C.SQUIGGLY_START : 0,
+      blowCnt: C.SHOT_BLOW_COUNT, frames: frames, frame: 0, img: frames[0], yr: 0, xr: 0
+    };
+  }
+
+  // Saucer structure (mirror 1B83, 10 bytes).
+  function mirrorSaucer(g) {
+    g.saucerStart = 0;
+    g.saucerActive = 0;
+    g.saucerHit = 0;
+    g.saucerHitTime = C.SAUCER_HIT_TIME;
+    g.saucerImg = D.SAUCER;
+    g.saucerXr = C.SAUCER_XR;
+    g.saucerDX = 2;
+  }
+
+  // InitRack 00B1: copy the stored reference position and direction.
+  function initRack(g) {
+    g.refYr = g.store.yr;
+    g.refXr = g.store.xr;
+    g.alienPosYr = g.store.yr;
+    g.alienPosXr = g.store.xr;
+    var dx = g.store.dx === 3 ? 2 : g.store.dx;
+    g.refDX = dx;
+    g.rackDirection = dx === -2 ? 1 : 0;
+  }
+
+  // ---- New game (NewGame 0798 to 0817, one player).
+  function createGame() {
+    var g = {
+      vram: new Uint8Array(ROWS * BYTES),
+      aliens: new Uint8Array(C.ALIENS),
+      score: 0,
+      ships: C.START_SHIPS,
+      livesDigit: C.START_SHIPS,
+      extraAvailable: true,
+      rackCnt: 0,
+      store: { yr: C.RACK_START_YR, xr: C.RACK_START_XR, dx: 2 },
+      reloadRate: 8,            // 18DF
+      tasksOn: false,
+      phase: 'prompt',
+      sub: 0,
+      isrDelay: 0,
+      vblank: 0,
+      frame: 0,
+      events: [],
+      input: { left: false, right: false, fire: false },
+      promptBlank: false,
+      deathPending: false,
+      overLetters: 0
+    };
+    for (var i = 0; i < C.ALIENS; i++) g.aliens[i] = 1;
+    copyRamMirror(g);
+    // RemoveShip 1A7F: one ship goes to the cannon; the digit shows the count.
+    g.livesDigit = g.ships;
+    g.ships--;
+    // PromptPlayer 088D: "PLAY PLAYER<1>" for 176 ticks with the score blinking.
+    printText(g, D.TEXT.PLAY_PLAYER, 0x58, 0x88);
+    g.isrDelay = C.PROMPT_TICKS;
+    return g;
+  }
+
+  // Shields, bottom line and rack for the first rack and after each rack.
+  function startRack(g) {
+    clearPlayField(g);
+    drawBottomLine(g);
+    drawShields(g);
+    initRack(g);
+    g.tasksOn = true;
+    g.phase = 'play';
+    g.sub = 0;
+  }
+
+  // ---- Game object 0: the player (028E). Runs at the end-screen half only.
+  function playerTask(g) {
+    if (g.playerAlive !== 0xFF) {
+      if (--g.expTimer !== 0) return;
+      g.playerOK = 0;
+      g.enableAlienFire = 0;
+      g.alienFireDelay = C.ALIEN_FIRE_DELAY;
+      g.expTimer = C.PLAYER_BLOW_TICKS;
+      if (--g.expCount !== 0) {
+        g.playerAlive = (g.playerAlive + 1) & 1;          // DrawPlayerDie 039B
+        g.playerImg = D.PLAYER_BLOWUP[g.playerAlive];
+        drawSimple(g, g.playerImg, g.playerXr, g.playerYr);
+        return;
+      }
+      // Blow-up finished (02AE).
+      eraseSimple(g, 16, g.playerXr, g.playerYr);
+      mirrorPlayer(g);
+      g.sound3 = 0;
+      if (g.invaded) return;
+      g.deathPending = true;
+      return;
+    }
+    g.playerOK = 1;
+    if (!g.enableAlienFire && --g.alienFireDelay === 0) g.enableAlienFire = 1;
+    var i = g.input;
+    if (i.right) { if (g.playerXr !== C.PLAYER_XR_MAX) g.playerXr++; }
+    else if (i.left) { if (g.playerXr !== C.PLAYER_XR_MIN) g.playerXr--; }
+    drawSimple(g, g.playerImg, g.playerXr, g.playerYr);
+  }
+
+  // ---- Game object 1: the player shot (03BB).
+  function compYToBeam(g, xr) { return ((xr & 0x80) ^ g.vblank) === 0; }
+
+  function endOfBlowup(g) {
+    var s = g.shot;
+    eraseShifted(g, s.img, s.xr, s.yr);
+    mirrorShot(g);
+    shotEnded(g);
+  }
+
+  function shotTask(g) {
+    var s = g.shot;
+    if (!compYToBeam(g, s.xr)) return;
+    if (s.status === 0) return;
+    if (s.status === 1) {                                   // InitPlyShot 03FA
+      s.status = 2;
+      s.xr = (g.playerXr + 8) & 0xFF;
+      drawShifted(g, s.img, s.xr, s.yr);
+      return;
+    }
+    if (s.status === 2) {                                   // MovePlyShot 040A
+      eraseShifted(g, s.img, s.xr, s.yr);
+      s.yr = (s.yr + C.SHOT_DY) & 0xFF;
+      if (drawCollide(g, s.img, s.xr, s.yr)) g.alienExploding = 1;
+      return;
+    }
+    if (s.status === 3) {                                   // 03D7
+      if (--s.timer === 0) { endOfBlowup(g); return; }
+      if (s.timer !== 0x0F) return;
+      eraseShifted(g, s.img, s.xr, s.yr);
+      s.img = D.SHOT_EXPLOSION;
+      s.yr = (s.yr - 2) & 0xFF;
+      s.xr = (s.xr - 3) & 0xFF;
+      drawShifted(g, s.img, s.xr, s.yr);
+      return;
+    }
+    if (s.status === 5) return;
+    endOfBlowup(g);
+  }
+
+  // EndOfBlowup 0447: every removed player shot moves the saucer score
+  // pointer (15 entries, 044C) and the shot count. The count's low bit sets
+  // the next saucer's side (0462).
+  function shotEnded(g) {
+    g.sauScoreIdx = g.sauScoreIdx + 1 >= C.SAUCER_SCORES.length ? 0 : g.sauScoreIdx + 1;
+    g.shotCount = (g.shotCount + 1) & 0xFF;
+    if (g.saucerActive) return;
+    if (g.shotCount & 1) { g.saucerXr = 0x29; g.saucerDX = 2; } else { g.saucerXr = 0xE0; g.saucerDX = -2; }
+  }
+
+  // ---- Game objects 2 to 4: alien shots and the saucer.
+  // FindInColumn 062F: lowest live alien in a 1-based column, or -1.
+  function findInColumn(g, col) {
+    for (var row = 0; row < C.ROWS; row++) {
+      var idx = row * C.COLS + col - 1;
+      if (g.aliens[idx]) return idx;
+    }
+    return -1;
+  }
+
+  // HandleAlienShot 0563. o1 and o2 are the step counts of the other shots.
+  function handleAlienShot(g, s, o1, o2) {
+    if (!(s.status & 0x80)) {
+      if (!g.enableAlienFire) return;
+      s.steps = 0;
+      // Reload (057C): too soon while the rate is not below another shot's steps.
+      if (o1 && g.reloadRate >= o1) return;
+      if (o2 && g.reloadRate >= o2) return;
+      var col;
+      if (s.track === 0) {                                  // 061B: over the player
+        col = findColumn(g, (g.playerXr + 8) & 0xFF);
+        if (col >= 12) col = 11;
+      } else {
+        col = C.COL_TABLE[s.cfir];
+        s.cfir++;
+      }
+      var idx = findInColumn(g, col);
+      if (idx < 0) return;
+      var p = alienCoords(g, idx);
+      s.xr = (p.xr + 7) & 0xFF;                             // 05AC
+      s.yr = (p.yr - 10) & 0xFF;                            // 05B0
+      s.status |= 0x80;
+      s.steps++;
+      return;
+    }
+    if (!compYToBeam(g, s.xr)) return;
+    if (s.status & 1) {                                     // ShotBlowingUp 0644
+      s.blowCnt--;
+      if (s.blowCnt === 3) {
+        eraseShifted(g, s.img, s.xr, s.yr);
+        s.img = D.ALIEN_SHOT_EXPLOSION;
+        s.xr = (s.xr - 2) & 0xFF;
+        s.yr = (s.yr - 2) & 0xFF;
+        drawCollide(g, s.img, s.xr, s.yr);
+      } else if (s.blowCnt === 0) {
+        eraseShifted(g, s.img, s.xr, s.yr);
+      }
+      return;
+    }
+    s.steps++;
+    eraseShifted(g, s.img, s.xr, s.yr);
+    s.frame = (s.frame + 1) & 3;
+    s.img = s.frames[s.frame];
+    s.yr = (s.yr + g.alienShotDelta) & 0xFF;
+    var hit = drawCollide(g, s.img, s.xr, s.yr);
+    if (s.yr < C.SHOT_END_YR) { s.status |= 1; return; }
+    if (!hit) return;
+    if (s.yr >= C.PLAYER_HIT_LO && s.yr < C.PLAYER_HIT_HI) g.playerAlive = 0;   // 060E
+    s.status |= 1;
+  }
+
+  // GameObj2 0476: rolling shot. Its timer is copied to shotSync, which lets
+  // only one of the three shots run per tick.
+  function rollingTask(g) {
+    g.obj[2].extra = 2;
+    if (g.rol.cfir === 0) { g.rol.cfir = 0xFFFF; return; }
+    handleAlienShot(g, g.rol, g.plu.steps, g.squ.steps);
+    if (g.rol.blowCnt !== 0) return;
+    g.rol = alienShot('rolling');
+    g.obj[2] = { timer: 0, extra: 2 };
+  }
+
+  // GameObj3 04B6: plunger shot. Off once it ends with one alien left.
+  function plungerTask(g) {
+    if (g.skipPlunger || g.shotSync !== 1) return;
+    handleAlienShot(g, g.plu, g.rol.steps, g.squ.steps);
+    if (g.plu.cfir >= C.PLUNGER_WRAP) g.plu.cfir = 0;
+    if (g.plu.blowCnt !== 0) return;
+    var keep = g.plu.cfir;
+    g.plu = alienShot('plunger');
+    g.obj[3] = { timer: 0, extra: 0 };
+    if (g.numAliens === 1) g.skipPlunger = 1;
+    g.plu.cfir = keep;
+  }
+
+  // 050F: squiggly shot.
+  function squigglyTask(g) {
+    handleAlienShot(g, g.squ, g.plu.steps, g.rol.steps);
+    if (g.squ.cfir >= C.SQUIGGLY_WRAP) g.squ.cfir = C.SQUIGGLY_START;
+    if (g.squ.blowCnt !== 0) return;
+    var keep = g.squ.cfir;
+    g.squ = alienShot('squiggly');
+    g.obj[4] = { timer: 0, extra: 0 };
+    g.squ.cfir = keep;
+  }
+
+  function drawSaucer(g) { drawSimple(g, g.saucerImg, g.saucerXr, C.SAUCER_YR); }
+
+  // 06F9: remove the saucer.
+  function removeSaucer(g) {
+    clearSmall(g, 24, g.saucerXr, C.SAUCER_YR);
+    mirrorSaucer(g);
+    soundOff(g, ~SND.UFO);
+  }
+
+  // GameObj4 0682: the saucer, or the squiggly shot when no saucer is due.
+  function saucerTask(g) {
+    if (g.shotSync !== 2) return;
+    if (!g.saucerStart || g.squ.steps !== 0) { squigglyTask(g); return; }
+    if (!g.saucerActive) {
+      if (g.numAliens < C.SAUCER_MIN_ALIENS) { squigglyTask(g); return; }
+      g.saucerActive = 1;
+      drawSaucer(g);
+    }
+    if (!compYToBeam(g, g.saucerXr)) return;
+    if (g.saucerHit) { saucerHitSequence(g); return; }
+    g.saucerXr = (g.saucerXr + g.saucerDX) & 0xFF;
+    drawSaucer(g);
+    if (g.saucerXr < 0x28 || g.saucerXr >= 0xE1) removeSaucer(g);
+  }
+
+  // 06D6: explosion at 0x1F, score at 0x18, removal at 0.
+  function saucerHitSequence(g) {
+    soundOff(g, ~SND.UFO);
+    g.saucerHitTime--;
+    if (g.saucerHitTime === 0x1F) {
+      g.events.push({ type: 'saucerHit' });
+      g.saucerImg = D.SAUCER_EXPLOSION;
+      drawSaucer(g);
+    } else if (g.saucerHitTime === 0x18) {
+      var pts = C.SAUCER_SCORES[g.sauScoreIdx];
+      addScore(g, pts);
+      printText(g, D.TEXT.SAUCER[pts], g.saucerXr, C.SAUCER_YR);
+      g.events.push({ type: 'saucerScore', points: pts });
+    } else if (g.saucerHitTime === 0) {
+      removeSaucer(g);
+    }
+  }
+
+  function alienTask(g, k) {
+    if (k === 2) rollingTask(g);
+    else if (k === 3) plungerTask(g);
+    else saucerTask(g);
+  }
+
+  // RunGameObjs 0248: timers count down first; a task runs when its timers
+  // are all 0.
+  function runObjects(g, first) {
+    for (var k = first; k <= 4; k++) {
+      var o = g.obj[k];
+      if (o.timer !== 0) { o.timer--; continue; }
+      if (o.extra !== 0) { o.extra--; continue; }
+      if (k === 0) playerTask(g);
+      else if (k === 1) shotTask(g);
+      else alienTask(g, k);
+    }
+  }
+
+  // ---- Aliens.
+  // DrawAlien 0100 (end-screen half).
+  function drawAlien(g) {
+    if (g.alienExploding) {                                 // AExplodeTime 1538
+      if (--g.expAlienTimer !== 0) return;
+      eraseSimple(g, 16, g.expAlienXr, g.expAlienYr);
+      g.shot.status = 4;
+      g.alienExploding = 0;
+      soundOff(g, ~SND.ALIEN_HIT);
+      return;
+    }
+    if (g.aliens[g.alienIndex]) {
+      var type = g.alienRow >> 1;                           // 011C: rows 0-1, 2-3, 4
+      drawOver(g, D.ALIENS[type][g.alienFrame], g.alienPosXr, g.alienPosYr);
+    }
+    g.waitOnDraw = 0;
+  }
+
+  // MoveRefAlien 01A1.
+  function moveRefAlien(g) {
+    g.refYr = (g.refYr + g.refDY) & 0xFF;
+    g.refXr = (g.refXr + g.refDX) & 0xFF;
+    g.refDY = 0;
+    g.alienFrame ^= 1;
+  }
+
+  // CursorNextAlien 0141 (mid-screen half).
+  function cursorNextAlien(g) {
+    if (!g.playerOK || g.waitOnDraw) return;
+    var idx = g.alienIndex, wraps = 0;
+    for (;;) {
+      idx++;
+      if (idx === C.ALIENS) {
+        if (++wraps === 2) return;                          // ReturnTwo 01CD
+        moveRefAlien(g);
+        idx = 0;
+      }
+      if (g.aliens[idx]) break;
+    }
+    g.alienIndex = idx;
+    var p = alienCoords(g, idx);
+    g.alienPosYr = p.yr;
+    g.alienPosXr = p.xr;
+    if (p.yr < C.INVADED_YR) { invade(g); return; }
+    g.alienRow = p.row;
+    g.waitOnDraw = 1;
+  }
+
+  // 1971 and 16E6: the rack reached the bottom.
+  function invade(g) {
+    g.invaded = 1;
+    g.playerAlive = 0;
+    g.phase = 'invaded';
+  }
+
+  // ---- Main game loop parts.
+  // PlrFireOrDemo 1618.
+  function plrFire(g) {
+    if (g.playerAlive !== 0xFF) return;
+    if (g.obj[0].timer !== 0) return;
+    if (g.shot.status !== 0) return;
+    if (g.fireBounce) { if (!g.input.fire) g.fireBounce = 0; return; }
+    if (g.input.fire) { g.shot.status = 1; g.fireBounce = 1; }
+  }
+
+  // PlayerShotHit 14D8, with CodeBug1 fixed: the row and column come from
+  // the hit point and must be inside the 5 x 11 rack.
+  function playerShotHit(g) {
+    var s = g.shot;
+    if (s.status !== 2) return;
+    if (s.yr >= C.SHOT_TOP_YR) { shotMiss(g); return; }
+    if (!g.alienExploding) return;
+    if (s.yr >= C.SAUCER_HIT_YR) { saucerShot(g); return; }
+    var target = s.yr + 6;
+    var ref = g.refYr >= 0x90 ? g.refYr - 256 : g.refYr;    // 14FB: the reference can wrap below 0
+    if (target <= ref) { shotMiss(g); return; }
+    var row = steps16(ref, target) - 1, col = findColumn(g, s.xr);
+    g.expAlienYr = (ref + 16 * row) & 0xFF;
+    g.expAlienXr = (g.refXr + 16 * (col - 1)) & 0xFF;
+    s.status = 5;
+    var idx = row * C.COLS + col - 1;
+    if (row > 4 || col > C.COLS || !g.aliens[idx]) { shotMiss(g); return; }
+    g.aliens[idx] = 0;
+    addScore(g, alienPoints(row));                          // ScoreForAlien 0A5F
+    soundOn(g, SND.ALIEN_HIT);
+    drawOver(g, D.ALIEN_EXPLOSION, g.expAlienXr, g.expAlienYr);
+    g.expAlienTimer = C.ALIEN_BLOW_TICKS;
+  }
+
+  // 1530: the shot left the field, hit a shield or hit an alien shot.
+  function shotMiss(g) {
+    g.shot.status = 3;
+    g.alienExploding = 0;
+    soundOff(g, ~SND.ALIEN_HIT);
+  }
+
+  // 1579: the saucer was hit; the shot is removed (status 4).
+  function saucerShot(g) {
+    g.saucerHit = 1;
+    g.shot.status = 4;
+    g.alienExploding = 0;
+    soundOff(g, ~SND.ALIEN_HIT);
+  }
+
+  // AdjustScore 0988. The score caps at 9,999 (I11).
+  function addScore(g, n) {
+    g.score = Math.min(C.MAX_SCORE, g.score + n);
+  }
+
+  // RackBump 1597: 23 bytes up the screen edge, from Yr 32.
+  function edgeHit(g, xr) {
+    var i = addr(xr, 0x20);
+    for (var k = 0; k < 23; k++) if (g.vram[i + k]) return true;
+    return false;
+  }
+
+  function rackBump(g) {
+    if (g.rackDirection === 0) {
+      if (!edgeHit(g, C.EDGE_RIGHT_XR)) return;
+      g.refDX = -2;
+      g.rackDirection = 1;
+    } else {
+      if (!edgeHit(g, C.EDGE_LEFT_XR)) return;
+      g.refDX = g.numAliens === 1 ? 3 : 2;                  // 18F1
+      g.rackDirection = 0;
+    }
+    g.refDY = C.RACK_DOWN;
+  }
+
+  // CountAliens 15F3.
+  function countAliens(g) {
+    var n = 0;
+    for (var i = 0; i < C.ALIENS; i++) n += g.aliens[i];
+    g.numAliens = n;
+  }
+
+  // Extra ship 0935: once, at score MSB 15 (1,500).
+  function extraShip(g) {
+    if (!g.extraAvailable || Math.floor(g.score / 100) < C.EXTRA_SHIP_MSB) return;
+    g.ships++;
+    g.livesDigit = g.ships + 1;
+    g.extraAvailable = false;
+    soundOn(g, SND.EXTRA);
+  }
+
+  // TimeFleetSound 1740 (end-screen half).
+  function timeFleetSound(g) {
+    if (!g.playerOK) return;
+    g.fleetCount = (g.fleetCount - 1) & 0xFF;
+    if (g.fleetCount !== 0) return;
+    if (g.numAliens === 0) return;
+    g.events.push({ type: 'march', tone: g.fleetTone });   // OUT port 5 (1757)
+    g.fleetCount = g.fleetReload;
+    g.changeFleet = 1;
+  }
+
+  // FleetDelayExShip 1775 (main loop): new delay and the next of 4 tones.
+  function fleetDelayTask(g) {
+    if (!g.changeFleet) return;
+    g.fleetReload = fleetDelay(g.numAliens);
+    g.fleetTone = (g.fleetTone + 1) & 3;
+    g.changeFleet = 0;
+  }
+
+  // The main game loop (081F), one pass.
+  function gameLoop(g) {
+    plrFire(g);
+    playerShotHit(g);
+    rackBump(g);
+    countAliens(g);
+    // The ROM checks the extra ship after the empty-rack jump (082F, 0835).
+    // Here it comes first, so a last-life death in the frame that clears
+    // the rack and reaches 1,500 still gets the ship (I3; ROM quirk).
+    extraShip(g);
+    if (g.numAliens === 0) { g.phase = 'rackEnd'; g.sub = 0; return; }
+    g.reloadRate = reloadRate(g.score);
+    if (g.numAliens < 9) g.alienShotDelta = -5;             // SpeedShots 08D8
+    if (g.shot.status !== 0) soundOn(g, SND.SHOT); else soundOff(g, ~SND.SHOT);   // ShotSound 172C
+    if (g.playerAlive !== 0xFF) soundOn(g, SND.PLAYER_HIT); // 083E
+    fleetDelayTask(g);
+    // CtrlSaucerSound 1804.
+    if (!g.saucerActive) soundOff(g, ~SND.UFO);
+    else if (!g.saucerHit) soundOn(g, SND.UFO);
+  }
+
+  // AShotReloadRate 170E: by score MSB (1CB8 and 1AA1).
+  function reloadRate(score) {
+    var msb = Math.floor(score / 100), lim = [2, 10, 20, 30], rate = [0x30, 0x10, 0x0B, 0x08];
+    for (var i = 0; i < 4; i++) if (msb <= lim[i]) return rate[i];
+    return 0x07;
+  }
+
+  // ---- Main thread by phase.
+  function mainThread(g) {
+    if (g.deathPending) {                                   // 02D0 after a blow-up
+      g.deathPending = false;
+      if (g.ships === 0) { gameOver(g); return; }
+      g.livesDigit = g.ships;
+      g.ships--;
+      g.events.push({ type: 'lifeLost' });
+      g.phase = 'play';
+      g.sub = 0;
+    }
+    switch (g.phase) {
+      case 'prompt':
+        g.promptBlank = (g.isrDelay & 4) !== 0;
+        if (g.isrDelay === 0) { g.promptBlank = false; startRack(g); }
+        return;
+      case 'play':
+        gameLoop(g);
+        return;
+      case 'rackEnd':
+        rackEnd(g);
+        return;
+      case 'invaded':
+        playerShotHit(g);
+        soundOn(g, SND.PLAYER_HIT);
+        if (g.playerAlive === 0xFF) { g.ships = 0; g.livesDigit = 0; gameOver(g); }
+        return;
+      case 'over':
+        overMessage(g);
+        return;
+    }
+  }
+
+  // 09EF and 0A3C: end of a rack.
+  function rackEnd(g) {
+    if (g.sub === 0) {
+      if (g.playerAlive === 0xFF) { g.isrDelay = C.RACK_END_TICKS; g.sub = 1; } else g.sub = 2;
+      return;
+    }
+    if (g.sub === 1) {
+      if (g.playerAlive !== 0xFF) { g.sub = 2; return; }
+      if (g.isrDelay !== 0) return;
+      g.sub = 2;
+    }
+    if (g.playerAlive !== 0xFF) return;
+    g.tasksOn = false;
+    clearPlayField(g);
+    copyRamMirror(g);
+    g.rackCnt = (g.rackCnt & 7) + 1;
+    g.store.yr = C.RACK_YR_TABLE[g.rackCnt - 1];
+    g.store.xr = C.RACK_START_XR;
+    for (var i = 0; i < C.ALIENS; i++) g.aliens[i] = 1;
+    g.events.push({ type: 'waveClear', rack: g.rackCnt });
+    startRack(g);
+  }
+
+  // 166D and 16C9: game over. "GAME OVER" prints one letter per 7 ticks.
+  function gameOver(g) {
+    g.tasksOn = false;
+    g.sound3 = 0;
+    g.livesDigit = 0;
+    g.phase = 'over';
+    g.overLetters = 0;
+    g.isrDelay = 1;
+    g.events.push({ type: 'gameOver', score: g.score });
+  }
+
+  function overMessage(g) {
+    if (g.overLetters >= D.TEXT.GAME_OVER.length || g.isrDelay !== 1) return;
+    var k = g.overLetters++;
+    printText(g, D.TEXT.GAME_OVER[k], 0x68 + 8 * k, 0xC0);
+    g.isrDelay = C.LETTER_TICKS;
+  }
+
+  // TimeToSaucer 0913: counts only while the rack is below its first-rack
+  // height. It tests for 0 before it counts down.
+  function timeToSaucer(g) {
+    if (g.refYr >= C.RACK_START_YR) return;
+    if (g.tillSaucer === 0) { g.tillSaucer = C.SAUCER_TIME; g.saucerStart = 1; }
+    g.tillSaucer = (g.tillSaucer - 1) & 0xFFFF;
+  }
+
+  // ---- One 60 Hz frame. input: { left, right, fire } held.
+  function step(g, input) {
+    g.events = [];
+    g.input = input || { left: false, right: false, fire: false };
+    // Mid-screen interrupt (008C).
+    g.vblank = 0;
+    if (g.tasksOn) { runObjects(g, 1); cursorNextAlien(g); }
+    mainThread(g);
+    // End-screen interrupt (0010).
+    g.vblank = 0x80;
+    g.isrDelay = (g.isrDelay - 1) & 0xFF;
+    if (g.tasksOn) {
+      timeFleetSound(g);
+      g.shotSync = g.obj[2].extra;
+      drawAlien(g);
+      runObjects(g, 0);
+      timeToSaucer(g);
+    }
+    mainThread(g);
+    g.frame++;
+    return g.events;
+  }
+
+  // Screen pixel test: x 0-223 left to right, y 0-255 top to bottom.
+  function pixel(g, x, y) {
+    var yr = 255 - y;
+    return (g.vram[x * BYTES + (yr >> 3)] >> (yr & 7)) & 1;
+  }
+
+  return {
+    createGame: createGame, step: step, pixel: pixel, addr: addr,
+    alienCoords: alienCoords, fleetDelay: fleetDelay, reloadRate: reloadRate,
+    findColumn: findColumn, steps16: steps16, findInColumn: findInColumn, ROWS: ROWS, BYTES: BYTES
+  };
+})();
+
+/* ===== VIEW ===== */
+// Pure renderer into a 224 x 256 framebuffer of 0 (black) and 1 (white).
+// x runs left to right, y top to bottom. The game picture comes from the
+// rules' screen memory; the HUD is drawn on top at the ROM positions.
+SI.VIEW = (function () {
+  'use strict';
+  var C = SI.CONST, D = SI.DATA, W = C.SCREEN_W, H = C.SCREEN_H;
+
+  function createFramebuffer() { return new Uint8Array(W * H); }
+  function clear(fb) { fb.fill(0); }
+
+  // Column bytes (bit 7 at the top) at screen (x, y): 8 rows.
+  function columns(fb, cols, x, y) {
+    for (var c = 0; c < cols.length; c++) {
+      var px = x + c;
+      if (px < 0 || px >= W) continue;
+      for (var b = 0; b < 8; b++) {
+        var py = y + 7 - b;
+        if (py >= 0 && py < H && (cols[c] >> b) & 1) fb[py * W + px] = 1;
+      }
+    }
+  }
+
+  function erase(fb, x, y, w, h) {
+    for (var py = y; py < y + h; py++) for (var px = x; px < x + w; px++) {
+      if (px >= 0 && px < W && py >= 0 && py < H) fb[py * W + px] = 0;
+    }
+  }
+
+  // Text in 8 x 8 cells.
+  function text(fb, s, x, y) {
+    for (var i = 0; i < s.length; i++) columns(fb, D.FONT[s[i]] || D.FONT[' '], x + 8 * i, y);
+  }
+
+  function centered(fb, s, y) { text(fb, s, Math.floor((W - 8 * s.length) / 2), y); }
+
+  function digits4(n) { return ('0000' + n).slice(-4); }
+
+  // Screen memory: row x, byte k holds Yr 8k..8k+7; y = 255 - Yr.
+  function blitGame(fb, g) {
+    var v = g.vram;
+    for (var x = 0; x < W; x++) {
+      for (var k = 0; k < 32; k++) {
+        var b = v[x * 32 + k];
+        if (!b) continue;
+        for (var bit = 0; bit < 8; bit++) if ((b >> bit) & 1) fb[(255 - (8 * k + bit)) * W + x] = 1;
+      }
+    }
+  }
+
+  // HUD (I11): header (241E), SCORE<1> (271C), HI-SCORE (2F1C), lives
+  // digit (2501) and spare cannons (2701).
+  function hud(fb, o) {
+    text(fb, D.TEXT.HEADER, 0, 8);
+    if (!o.blankScore) text(fb, digits4(o.score), 24, 24);
+    text(fb, digits4(o.hi), 88, 24);
+    if (o.lives === undefined) return;
+    text(fb, String(o.lives), 8, 240);
+    for (var i = 0; i < o.ships && i < 7; i++) columns(fb, D.PLAYER, 24 + 16 * i, 240);
+  }
+
+  // Play screen. o: { hi, label }.
+  function renderPlay(fb, g, o) {
+    clear(fb);
+    blitGame(fb, g);
+    hud(fb, { score: g.score, hi: o.hi, lives: g.livesDigit, ships: g.ships, blankScore: g.promptBlank });
+    if (o.label) {
+      var w = 8 * o.label.length + 8, x = Math.floor((W - w) / 2);
+      erase(fb, x, 124, w, 16);
+      centered(fb, o.label, 128);
+    }
+  }
+
+  function prompt(fb, on) { if (on) centered(fb, 'PRESS ENTER', 216); }
+
+  // Attract screens (IF1). page 0: title (0B05, 0ACF positions); page 1:
+  // score advance table (DrawAdvTable 1815, tables 1DBE and 1DCF); page 2:
+  // Top 10 (S9). o: { score, hi, scores, prompt }.
+  function renderAttract(fb, page, o) {
+    clear(fb);
+    hud(fb, { score: o.score, hi: o.hi });
+    if (page === 0) {
+      text(fb, D.TEXT.PLAY, 96, 64);
+      text(fb, D.TEXT.INVADERS, 56, 88);
+    } else if (page === 1) {
+      text(fb, D.TEXT.ADVANCE, 32, 120);
+      var rows = [[D.SAUCER.slice(4, 20), D.TEXT.MYSTERY], [D.ALIENS[2][0], D.TEXT.PTS30],
+        [D.ALIENS[1][1], D.TEXT.PTS20], [D.ALIENS[0][0], D.TEXT.PTS10]];
+      for (var i = 0; i < rows.length; i++) {
+        columns(fb, rows[i][0], 64, 136 + 16 * i);
+        text(fb, rows[i][1], 80, 136 + 16 * i);
+      }
+    } else {
+      centered(fb, 'HIGH SCORES', 64);
+      for (var r = 0; r < ARCADE.MAX_ENTRIES; r++) {
+        var e = o.scores[r];
+        var line = (r < 9 ? ' ' : '') + (r + 1) + '. ' + (e ? e.name + ' ' + digits4(e.score) : '--- ----');
+        text(fb, line, 64, 88 + 12 * r);
+      }
+    }
+    prompt(fb, o.prompt);
+  }
+
+  // Name entry (S7, IK3). o: { score, hi, blink }.
+  function renderNameEntry(fb, ne, o) {
+    clear(fb);
+    hud(fb, { score: o.score, hi: o.hi });
+    centered(fb, 'ENTER YOUR INITIALS', 96);
+    centered(fb, 'SCORE ' + digits4(o.score), 120);
+    for (var k = 0; k < ARCADE.NAME_LEN; k++) {
+      if (k > ne.slot) continue;
+      if (k === ne.slot && !o.blink) continue;
+      text(fb, ne.letters[k], 88 + 16 * k, 144);
+    }
+    for (var u = 0; u < ARCADE.NAME_LEN; u++) text(fb, '-', 88 + 16 * u, 154);
+    centered(fb, '< > LETTER  ENTER OK', 184);
+  }
+
+  return {
+    createFramebuffer: createFramebuffer, clear: clear, text: text, centered: centered,
+    columns: columns, hud: hud, renderPlay: renderPlay, renderAttract: renderAttract,
+    renderNameEntry: renderNameEntry, blitGame: blitGame, digits4: digits4, W: W, H: H
+  };
+})();
+
+/* ===== APP ===== */
+// Screen state machine: attract loop, play, game-over banner, name entry.
+SI.APP = (function () {
+  'use strict';
+  var C = SI.CONST, R = SI.RULES, V = SI.VIEW, D = SI.DATA;
+
+  // Fixed keys (IK1 to IK3, S4).
+  var KEY_MAP = { ArrowLeft: 'left', ArrowRight: 'right', Space: 'fire', Enter: 'start', KeyM: 'sound' };
+  // Footer keys by screen (S12).
+  function footerKeys(screen) {
+    if (screen === 'nameEntry') return [['\u2190 \u2192', 'LETTER'], ['ENTER', 'NEXT']];
+    if (screen === 'attract') return [['ENTER', 'START']];
+    if (screen === 'gameOver') return [];             // the banner takes no keys
+    return [['\u2190 \u2192', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'PAUSE']];
+  }
+  var PAGE_FRAMES = 7 * C.FPS;        // IF1 (default): each attract screen about 7 s
+  var PAGES = 3;                      // Title, score advance table, Top 10
+  var BLINK_FRAMES = 32;              // PRESS ENTER on 32 frames, off 32 frames
+  var BANNER_FRAMES = 3 * C.FPS;      // IF3 (default): game-over banner
+
+  function validScores(v) { return ARCADE.validateScores(v, C.MAX_SCORE); }
+
+  function createApp(opts) {
+    var store = opts.store;
+    var app = {
+      screen: 'attract',
+      page: 0,
+      timer: 0,
+      frame: 0,
+      game: null,
+      paused: false,
+      lastScore: 0,
+      nameEntry: null,
+      scores: store.load('scores', validScores, function () { return []; }),
+      soundOn: store.load('sound', ARCADE.validateSound, function () { return true; }),
+      store: store
+    };
+
+    // HI-SCORE (I11): the first Top 10 entry, or 0.
+    app.hiScore = function () { return app.scores.length ? app.scores[0].score : 0; };
+
+    // Blur or hidden tab (S11). Play stays paused until Enter (E5); the
+    // game-over banner resumes when the page is back (app.resume).
+    app.pause = function () { if (app.screen === 'play' || app.screen === 'gameOver') app.paused = true; };
+
+    app.resume = function () { if (app.screen === 'gameOver') app.paused = false; };
+
+    function toAttract(page) {
+      app.screen = 'attract';
+      app.page = page;
+      app.timer = 0;
+    }
+
+    function startGame() {
+      app.game = R.createGame();
+      app.paused = false;
+      app.screen = 'play';
+    }
+
+    // inp: { held, pressed } from ARCADE.createInput. Returns sound events.
+    app.step = function (inp) {
+      var p = inp.pressed, h = inp.held, events = [];
+      app.frame++;
+      if (p.sound) {
+        app.soundOn = !app.soundOn;
+        store.save('sound', app.soundOn);
+      }
+      switch (app.screen) {
+        case 'attract':
+          if (p.start) { startGame(); break; }
+          if (++app.timer >= PAGE_FRAMES) { app.page = (app.page + 1) % PAGES; app.timer = 0; }
+          break;
+        case 'play':
+          if (p.start) app.paused = !app.paused;
+          if (app.paused) break;
+          events = R.step(app.game, { left: h.left, right: h.right, fire: h.fire });
+          for (var i = 0; i < events.length; i++) {
+            if (events[i].type === 'gameOver') {
+              app.lastScore = app.game.score;
+              app.screen = 'gameOver';
+              app.timer = 0;
+            }
+          }
+          break;
+        case 'gameOver':
+          if (app.paused) break;
+          R.step(app.game, {});
+          if (++app.timer < BANNER_FRAMES) break;
+          if (ARCADE.qualifies(app.scores, app.lastScore)) {
+            app.nameEntry = ARCADE.createNameEntry('left', 'right');
+            app.screen = 'nameEntry';
+          } else {
+            toAttract(0);
+          }
+          break;
+        case 'nameEntry':
+          var name = app.nameEntry.step(inp);
+          if (name !== null) {
+            app.scores = ARCADE.insertScore(app.scores, { name: name, score: app.lastScore }).list;
+            store.save('scores', app.scores);
+            app.nameEntry = null;
+            toAttract(2);
+          }
+          break;
+      }
+      return events;
+    };
+
+    // True while the saucer sound should loop.
+    app.ufoSound = function () {
+      return app.screen === 'play' && !app.paused && !!app.game && (app.game.sound3 & 1) === 1;
+    };
+
+    // True while game sound must be held (pause).
+    app.audioPaused = function () { return (app.screen === 'play' || app.screen === 'gameOver') && app.paused; };
+
+    // True on the frames where PRESS ENTER shows.
+    app.blinkOn = function () { return ((app.frame / BLINK_FRAMES) | 0) % 2 === 0; };
+
+    app.render = function (fb) {
+      if (app.screen === 'play' || app.screen === 'gameOver') {
+        V.renderPlay(fb, app.game, { hi: app.hiScore(), label: app.paused ? 'PAUSE' : '' });
+      } else if (app.screen === 'attract') {
+        V.renderAttract(fb, app.page, { score: app.lastScore, hi: app.hiScore(), scores: app.scores, prompt: app.blinkOn() });
+      } else {
+        V.renderNameEntry(fb, app.nameEntry, { score: app.lastScore, hi: app.hiScore(), blink: app.blinkOn() });
+      }
+    };
+
+    return app;
+  }
+
+  return {
+    KEY_MAP: KEY_MAP, footerKeys: footerKeys, createApp: createApp,
+    PAGE_FRAMES: PAGE_FRAMES, BLINK_FRAMES: BLINK_FRAMES, BANNER_FRAMES: BANNER_FRAMES
+  };
+})();
+/* ==END LOGIC== */
+</script>
+<script>
+/* ===== ARCADE PLATFORM ===== */
+// Shared browser layer. pong.html and space-invaders.html hold the same copy
+// of this section: canvas fit, footer, loop, keyboard, blur and audio.
+var ARCADE_PLATFORM = (function () {
+  'use strict';
+
+  // Keeps the canvas at aspect w:h, as large as fits in the stage. The stage
+  // background gives the black margins (requirements S3). onSize gets the
+  // shown size in CSS pixels and the device pixel ratio.
+  function fitCanvas(stage, canvas, w, h, onSize) {
+    function fit() {
+      var k = Math.min(stage.clientWidth / w, stage.clientHeight / h);
+      var cw = Math.max(1, Math.floor(w * k)), ch = Math.max(1, Math.floor(h * k));
+      canvas.style.width = cw + 'px';
+      canvas.style.height = ch + 'px';
+      onSize(cw, ch, window.devicePixelRatio || 1);
+    }
+    fit();
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(stage);
+    window.addEventListener('resize', fit);
+  }
+
+  // Footer (S12): keys, the M key with the sound state and the storage
+  // notice. Rebuilt only when something changes. keys: [[key, label], ...].
+  function createFooter(keysEl, soundEl, noticeEl) {
+    var last = '';
+    return function update(keys, soundOn, storeOk) {
+      var sig = JSON.stringify([keys, soundOn, storeOk]);
+      if (sig === last) return;
+      last = sig;
+      keysEl.textContent = '';
+      keys.forEach(function (k) {
+        var span = document.createElement('span');
+        span.className = 'item';
+        var kbd = document.createElement('kbd');
+        kbd.textContent = k[0];
+        span.appendChild(kbd);
+        span.appendChild(document.createTextNode(' ' + k[1]));
+        keysEl.appendChild(span);
+      });
+      soundEl.textContent = '';
+      var m = document.createElement('kbd');
+      m.textContent = 'M';
+      soundEl.appendChild(m);
+      soundEl.appendChild(document.createTextNode(' SOUND: ' + (soundOn ? 'ON' : 'OFF')));
+      noticeEl.hidden = storeOk;
+    };
+  }
+
+  // Runs step() at the fixed game rate and render() once per animation frame.
+  function startLoop(fps, step, render) {
+    var ticker = ARCADE.createTicker(fps, 5);
+    function frame(now) {
+      var n = ticker.advance(now);
+      for (var i = 0; i < n; i++) step();
+      render();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    return ticker;
+  }
+
+  // Keyboard, blur and visibility. onAway runs when the page loses focus or
+  // is hidden (S11); onBack runs when it has focus and is visible again.
+  function bindInput(input, onAway, onBack) {
+    window.addEventListener('keydown', function (e) {
+      if (input.keyDown(e)) e.preventDefault();
+    });
+    window.addEventListener('keyup', function (e) {
+      if (input.keyUp(e)) e.preventDefault();
+    });
+    window.addEventListener('blur', onAway);
+    // Resume only when the page is both visible and focused.
+    function back() { if (!document.hidden && document.hasFocus()) onBack(); }
+    window.addEventListener('focus', back);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) onAway(); else back();
+    });
+  }
+
+  // ---- Audio (S5): synthesized effects only. The AudioContext is made on
+  // the first key press (browsers block autoplay). Any WebAudio failure
+  // leaves the game silent. While muted or paused, no new sound starts.
+  function createAudio() {
+    var ctx = null, master = null, noiseBuf = null;
+    var failed = false, muted = false, paused = false;
+    var loops = {};
+
+    function unlock() {
+      if (ctx || failed) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { failed = true; return; }
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = muted ? 0 : 1;
+        master.connect(ctx.destination);
+        // Some browsers start the context suspended.
+        if (paused) ctx.suspend();
+        else if (ctx.state === 'suspended') ctx.resume();
+      } catch (e) {
+        failed = true;
+        ctx = null;
+      }
+    }
+
+    function live() { return !!ctx && !failed && !muted && !paused; }
+
+    function envelope(g, t, end, level, decay) {
+      g.gain.setValueAtTime(level, t);
+      if (decay) g.gain.linearRampToValueAtTime(0, end);
+      else g.gain.setValueAtTime(level, end);
+    }
+
+    // A tone at freq Hz for ms milliseconds. opts: type (default square),
+    // gain, endFreq (slide), decay (fade to 0).
+    function tone(freq, ms, opts) {
+      if (!live()) return;
+      opts = opts || {};
+      try {
+        var t = ctx.currentTime, end = t + ms / 1000;
+        var osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = opts.type || 'square';
+        osc.frequency.value = freq;
+        osc.frequency.setValueAtTime(freq, t);
+        if (opts.endFreq) osc.frequency.linearRampToValueAtTime(opts.endFreq, end);
+        envelope(g, t, end, opts.gain || 0.12, opts.decay);
+        osc.connect(g);
+        g.connect(master);
+        osc.start(t);
+        osc.stop(end);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // Filtered white noise for ms milliseconds. opts: gain, filter (low-pass
+    // cut-off in Hz), decay.
+    function noise(ms, opts) {
+      if (!live()) return;
+      opts = opts || {};
+      try {
+        if (!noiseBuf) {
+          noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+          var d = noiseBuf.getChannelData(0);
+          for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+        var t = ctx.currentTime, end = t + ms / 1000;
+        var src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+        src.buffer = noiseBuf;
+        src.loop = true;
+        f.type = 'lowpass';
+        f.frequency.value = opts.filter || 2000;
+        envelope(g, t, end, opts.gain || 0.2, opts.decay !== false);
+        src.connect(f);
+        f.connect(g);
+        g.connect(master);
+        src.start(t);
+        src.stop(end);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // A continuous tone until stopLoop(id). Calling loop again for a live id
+    // does nothing. opts: type, gain, lfoHz and lfoDepth (pitch warble).
+    function loop(id, freq, opts) {
+      if (!live() || loops[id]) return;
+      opts = opts || {};
+      try {
+        var osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = opts.type || 'square';
+        osc.frequency.value = freq;
+        g.gain.value = opts.gain || 0.08;
+        var nodes = [osc];
+        if (opts.lfoHz) {
+          var lfo = ctx.createOscillator(), depth = ctx.createGain();
+          lfo.frequency.value = opts.lfoHz;
+          depth.gain.value = opts.lfoDepth || freq / 4;
+          lfo.connect(depth);
+          depth.connect(osc.frequency);
+          lfo.start();
+          nodes.push(lfo);
+        }
+        osc.connect(g);
+        g.connect(master);
+        osc.start();
+        loops[id] = nodes;
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function stopLoop(id) {
+      var nodes = loops[id];
+      if (!nodes) return;
+      delete loops[id];
+      nodes.forEach(function (n) { try { n.stop(); } catch (e) { /* already stopped */ } });
+    }
+
+    function stopAllLoops() { Object.keys(loops).forEach(stopLoop); }
+
+    function setMuted(m) {
+      if (m === muted) return;
+      muted = m;
+      if (m) stopAllLoops();
+      if (!ctx) return;
+      try { master.gain.value = m ? 0 : 1; } catch (e) { failed = true; }
+    }
+
+    // Pause and hidden tab suspend the context (S11).
+    function setPaused(p) {
+      if (p === paused) return;
+      paused = p;
+      if (p) stopAllLoops();
+      if (!ctx) return;
+      try { if (p) ctx.suspend(); else ctx.resume(); } catch (e) { failed = true; }
+    }
+
+    return {
+      unlock: unlock, tone: tone, noise: noise, loop: loop, stopLoop: stopLoop,
+      setMuted: setMuted, setPaused: setPaused
+    };
+  }
+
+  return {
+    fitCanvas: fitCanvas, createFooter: createFooter, startLoop: startLoop,
+    bindInput: bindInput, createAudio: createAudio
+  };
+})();
+
+/* ===== PLATFORM ===== */
+var PLATFORM = (function () {
+  'use strict';
+  var V = SI.VIEW, W = V.W, H = V.H;
+
+  // Framebuffer -> 224 x 256 ImageData -> integer-scaled canvas. CSS
+  // stretches the small remainder with image-rendering: pixelated (S3).
+  function createScreen(canvas) {
+    var off = document.createElement('canvas');
+    off.width = W; off.height = H;
+    var offCtx = off.getContext('2d');
+    var image = offCtx.createImageData(W, H);
+    var ctx = canvas.getContext('2d');
+    var fb = V.createFramebuffer();
+
+    function resize(cssW, cssH, dpr) {
+      var k = Math.max(1, Math.floor(Math.min(cssW * dpr / W, cssH * dpr / H)));
+      if (canvas.width !== W * k) { canvas.width = W * k; canvas.height = H * k; }
+    }
+
+    function present() {
+      var d = image.data;
+      for (var i = 0; i < fb.length; i++) {
+        var v = fb[i] ? 255 : 0, j = i * 4;
+        d[j] = v; d[j + 1] = v; d[j + 2] = v; d[j + 3] = 255;
+      }
+      offCtx.putImageData(image, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+    }
+
+    return { fb: fb, resize: resize, present: present };
+  }
+
+  // Sound effects (I12). Pitches are chosen by ear (plan R10). The march
+  // plays 4 low tones in turn, each about 4 ticks long (1767).
+  var MARCH_HZ = [98, 87, 78, 69];
+
+  function playEvents(audio, events) {
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      if (e.type === 'march') audio.tone(MARCH_HZ[e.tone & 3], 70, { gain: 0.25 });
+      else if (e.type === 'shot') audio.noise(260, { filter: 3500, gain: 0.12 });
+      else if (e.type === 'alienHit') audio.tone(320, 110, { endFreq: 60, gain: 0.18, decay: true });
+      else if (e.type === 'playerHit') audio.noise(900, { filter: 700, gain: 0.3 });
+      else if (e.type === 'saucerHit') audio.tone(1200, 500, { endFreq: 150, gain: 0.12, decay: true });
+      else if (e.type === 'extraLife') audio.tone(880, 300, { gain: 0.1 });
+    }
+  }
+
+  return { createScreen: createScreen, playEvents: playEvents, MARCH_HZ: MARCH_HZ };
+})();
+
+/* ===== BOOT ===== */
+(function () {
+  'use strict';
+  var canvas = document.getElementById('screen');
+  var screen = PLATFORM.createScreen(canvas);
+  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, SI.CONST.SCREEN_W, SI.CONST.SCREEN_H,
+    function (w, h, dpr) { screen.resize(w, h, dpr); });
+  var footer = ARCADE_PLATFORM.createFooter(document.getElementById('keys'),
+    document.getElementById('sound'), document.getElementById('notice'));
+  var store = ARCADE.createStore(function () { return window.localStorage; }, SI.CONST.STORAGE_PREFIX);
+  var app = SI.APP.createApp({ store: store });
+  var input = ARCADE.createInput(SI.APP.KEY_MAP);
+  var audio = ARCADE_PLATFORM.createAudio();
+  window.addEventListener('keydown', function () { audio.unlock(); }, true);
+  var ticker = ARCADE_PLATFORM.startLoop(SI.CONST.FPS, function () {
+    var events = app.step(input.frame());
+    audio.setMuted(!app.soundOn);
+    audio.setPaused(app.audioPaused());
+    PLATFORM.playEvents(audio, events);
+    if (app.ufoSound()) audio.loop('ufo', 450, { lfoHz: 7, lfoDepth: 180, gain: 0.06 });
+    else audio.stopLoop('ufo');
+  }, function () {
+    app.render(screen.fb);
+    screen.present();
+    footer(SI.APP.footerKeys(app.screen), app.soundOn, store.ok);
+  });
+  ARCADE_PLATFORM.bindInput(input, function () {
+    input.clear();
+    app.pause();
+    audio.setPaused(true);
+  }, function () {
+    ticker.reset();
+    app.resume();
+    audio.setPaused(app.audioPaused());
+  });
+  // Read-only handle for end-to-end tests.
+  window.siApp = app;
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1108 @@
+<!DOCTYPE html>
+<!--
+  Pong (1972 Atari arcade), one player against the CPU. One offline file.
+  Private use only.
+
+  Sections (in order):
+    HEAD/CSS          styles (white on black only)
+    DOM               stage, canvas and footer
+    ARCADE            shared logic (same copy in pong.html and space-invaders.html)
+    CONST             fixed numbers (requirements and sources)
+    RULES             pure game engine
+    DATA              art and text
+    VIEW              pure renderer
+    APP               pure screen state machine
+    ARCADE PLATFORM   shared browser layer (same copy in both games)
+    PLATFORM          drawing for this game
+    BOOT              start-up
+
+  ARCADE to APP sit between the LOGIC markers. They use no DOM, storage or
+  audio. Node tests load that block with tests/helpers/load-arcade.mjs.
+
+  Tests:
+    npm test           unit tests (node:test, no packages)
+    npm run test:e2e   Playwright end-to-end tests (dev only)
+
+  Plan: docs/arcade-build-plan.md. Requirements: docs/arcade-requirements.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PONG</title>
+<style>
+/* ===== HEAD/CSS ===== */
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff; }
+body { display: flex; flex-direction: column; font-family: "Courier New", Courier, monospace; }
+#stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+#screen { display: block; background: #000; image-rendering: pixelated; image-rendering: crisp-edges; }
+#footer {
+  flex: none; display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+  gap: 2px 16px; padding: 6px 10px; border-top: 1px solid #fff; background: #000; font-size: 13px; line-height: 1.35;
+}
+#footer kbd { font-family: inherit; font-weight: 700; }
+#keys { display: contents; }
+#footer .item, #sound { white-space: nowrap; }
+#notice { margin: 0; font-weight: 700; white-space: nowrap; }
+#notice[hidden] { display: none; }
+</style>
+</head>
+<body>
+<!-- ===== DOM ===== -->
+<main id="stage"><canvas id="screen" width="4" height="3" aria-label="Pong game screen"></canvas></main>
+<footer id="footer"><span id="keys"></span><span id="sound"></span><p id="notice" hidden>Scores not saved</p></footer>
+
+<script>
+/* ==BEGIN LOGIC== */
+/* ===== ARCADE ===== */
+// Shared logic. pong.html and space-invaders.html hold the same copy of this
+// section. tests/unit/arcade-common.test.mjs runs one suite against each file.
+var ARCADE = (function () {
+  'use strict';
+
+  function has(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+  // Fixed-timestep accumulator (copy of the Tetris ticker). advance(nowMs)
+  // returns how many game frames to run. Catch-up is capped; when the cap is
+  // hit (for example after a tab restore) the rest of the backlog is dropped.
+  function createTicker(fps, maxSteps) {
+    var stepMs = 1000 / fps;
+    var cap = maxSteps || 5;
+    var acc = 0, last = null;
+    return {
+      advance: function (now) {
+        if (last === null) { last = now; return 0; }
+        var dt = Math.max(0, now - last);
+        last = now;
+        acc += dt;
+        var n = Math.floor(acc / stepMs);
+        if (n > cap) { n = cap; acc = 0; } else { acc -= n * stepMs; }
+        return n;
+      },
+      reset: function () { acc = 0; last = null; }
+    };
+  }
+
+  // ---- Input. keyMap maps KeyboardEvent.code to an action name; several
+  // codes may share an action. OS key repeat is ignored. Ctrl, Alt and Meta
+  // combinations are ignored (requirements S4).
+  function createInput(keyMap) {
+    var codes = Object.keys(keyMap);
+    var actions = [];
+    codes.forEach(function (c) { if (actions.indexOf(keyMap[c]) < 0) actions.push(keyMap[c]); });
+    var down = {};     // code -> true while held
+    var pressed = {};  // code -> true, pressed since the last frame
+
+    // e: { code, repeat, ctrlKey, altKey, metaKey }. Returns true when the
+    // page should call preventDefault.
+    function keyDown(e) {
+      if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      var known = has(keyMap, e.code);
+      if (e.repeat) return known;
+      down[e.code] = true;
+      pressed[e.code] = true;
+      return known;
+    }
+
+    function keyUp(e) {
+      delete down[e.code];
+      return has(keyMap, e.code);
+    }
+
+    function clear() { down = {}; pressed = {}; }
+
+    // Snapshot for one game frame. A tap that started and ended inside the
+    // frame still counts as held for that frame.
+    function frame() {
+      var held = {}, edge = {};
+      actions.forEach(function (a) { held[a] = false; edge[a] = false; });
+      codes.forEach(function (c) {
+        var a = keyMap[c];
+        if (pressed[c]) edge[a] = true;
+        if (down[c] || pressed[c]) held[a] = true;
+      });
+      pressed = {};
+      return { held: held, pressed: edge };
+    }
+
+    return { keyDown: keyDown, keyUp: keyUp, clear: clear, frame: frame };
+  }
+
+  // ---- Storage adapter. getBackend returns a localStorage-like object and
+  // may throw. Any error after the probe, and any corrupt value (bad JSON or
+  // a validator that returns null), drops the backend for the session: ok
+  // becomes false and later loads and saves use memory only (requirements S10).
+  // A corrupt value is removed first, so the next session starts clean.
+  function createStore(getBackend, prefix) {
+    var store = { ok: true };
+    var memory = {};
+    var backend = null;
+    try {
+      backend = getBackend();
+      var probe = prefix + 'probe';
+      backend.setItem(probe, '1');
+      backend.removeItem(probe);
+    } catch (e) {
+      backend = null;
+      store.ok = false;
+    }
+
+    function fail() { backend = null; store.ok = false; }
+
+    store.load = function (name, validate, fallback) {
+      var raw = null;
+      if (backend) {
+        try { raw = backend.getItem(prefix + name); } catch (e) { fail(); }
+      }
+      if (!backend) raw = has(memory, name) ? memory[name] : null;
+      if (raw === null || raw === undefined) return fallback();
+      var value = null;
+      try { value = validate(JSON.parse(raw)); } catch (e) { value = null; }
+      if (value === null) {
+        // Remove the corrupt value so a later session can save again.
+        if (backend) { try { backend.removeItem(prefix + name); } catch (e) { /* drop below */ } }
+        fail();
+        return fallback();
+      }
+      return value;
+    };
+
+    store.save = function (name, value) {
+      var text = JSON.stringify(value);
+      memory[name] = text;
+      if (!backend) return false;
+      try {
+        backend.setItem(prefix + name, text);
+        return true;
+      } catch (e) {
+        fail();
+        return false;
+      }
+    };
+
+    return store;
+  }
+
+  // ---- Top 10 (requirements S6 to S8). Entry: { name: 3 letters A-Z, score }.
+  var MAX_ENTRIES = 10;
+  var NAME_LEN = 3;
+  var LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+  function validName(n) { return typeof n === 'string' && /^[A-Z]{3}$/.test(n); }
+
+  function validScore(v, maxScore) {
+    return typeof v === 'number' && Math.floor(v) === v && v >= 1 && v <= maxScore;
+  }
+
+  // Returns a clean copy, or null when anything is invalid: not an array,
+  // more than 10 entries, a bad entry or an order that is not highest first.
+  function validateScores(raw, maxScore) {
+    if (!Array.isArray(raw) || raw.length > MAX_ENTRIES) return null;
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var e = raw[i];
+      if (!e || typeof e !== 'object' || !validName(e.name) || !validScore(e.score, maxScore)) return null;
+      if (i > 0 && e.score > out[i - 1].score) return null;
+      out.push({ name: e.name, score: e.score });
+    }
+    return out;
+  }
+
+  // Above 0, and fewer than 10 entries or above the 10th (S8).
+  function qualifies(list, score) {
+    if (!(score > 0)) return false;
+    return list.length < MAX_ENTRIES || score > list[MAX_ENTRIES - 1].score;
+  }
+
+  // Rank (0-based) a new score takes. Ties rank below older equal scores.
+  function rankOf(list, score) {
+    var i = 0;
+    while (i < list.length && list[i].score >= score) i++;
+    return i;
+  }
+
+  function insertScore(list, entry) {
+    var out = list.slice();
+    var r = rankOf(out, entry.score);
+    out.splice(r, 0, { name: entry.name, score: entry.score });
+    return { list: out.slice(0, MAX_ENTRIES), rank: r };
+  }
+
+  // ---- Name entry (S7). 3 slots, each starts at A. prevAction and
+  // nextAction change the letter (wrapping A to Z and Z to A). Start accepts
+  // the slot; after slot 3 step() returns the name.
+  function createNameEntry(prevAction, nextAction) {
+    var ne = { letters: ['A', 'A', 'A'], slot: 0 };
+
+    function shift(ch, dir) {
+      var i = LETTERS.indexOf(ch);
+      return LETTERS[(i + dir + LETTERS.length) % LETTERS.length];
+    }
+
+    ne.step = function (inp) {
+      var p = inp.pressed;
+      if (p.start) {
+        if (ne.slot === NAME_LEN - 1) return ne.letters.join('');
+        ne.slot++;
+        return null;
+      }
+      if (p[nextAction]) ne.letters[ne.slot] = shift(ne.letters[ne.slot], 1);
+      else if (p[prevAction]) ne.letters[ne.slot] = shift(ne.letters[ne.slot], -1);
+      return null;
+    };
+
+    return ne;
+  }
+
+  // Sound setting: a boolean, else null (corrupt).
+  function validateSound(raw) { return typeof raw === 'boolean' ? raw : null; }
+
+  return {
+    createTicker: createTicker, createInput: createInput, createStore: createStore,
+    MAX_ENTRIES: MAX_ENTRIES, NAME_LEN: NAME_LEN, LETTERS: LETTERS,
+    validName: validName, validateScores: validateScores, qualifies: qualifies,
+    rankOf: rankOf, insertScore: insertScore, createNameEntry: createNameEntry,
+    validateSound: validateSound
+  };
+})();
+
+var PONG = {};
+
+/* ===== CONST ===== */
+// Native circuit units: x is one clock of the 7.159 MHz dot clock, y is one
+// scan line. Sources (docs/arcade-build-plan.md part 2.4):
+//   E  = Edwards, "Reconstructing Pong on an FPGA" (Columbia, 2012)
+//   Ho = Holden, pong-story.com/LAWN_TENNIS.pdf
+//   M  = MAME src/mame/atari/nl_pong.cpp
+PONG.CONST = (function () {
+  'use strict';
+  return {
+    // 455 clocks x 262 lines at 7.159 MHz = 60.05 Hz (E 1.1 to 1.3).
+    FPS: 7159090 / 455 / 262,
+    // Visible area H 80-454 by lines 16-261 (E 1.4, 1.9): x = H - 80, y = line - 16.
+    W: 375,
+    H: 246,
+    // Paddles 4 wide at H 128 and H 384 (E 1.6). Height 16 gives 8 equal
+    // 2-line segments (plan decision 9).
+    PADDLE_W: 4,
+    PADDLE_H: 16,
+    LEFT_X: 48,
+    RIGHT_X: 304,
+    // The paddle top cannot reach the top strip (P5). No source gives the
+    // line count; unverified assumption (plan decision 11).
+    PADDLE_MIN_Y: 16,
+    // Ball 4 x 4 (E 1.8, Ho p37).
+    BALL: 4,
+    // Horizontal units per frame for under 4 hits, 4 to 11 hits and 12 or
+    // more (Ho p50-51, M). The hit counter stops at 12 (E 1.8).
+    SPEEDS: [2, 3, 4],
+    HITS_FAST: 4,
+    HITS_FASTEST: 12,
+    // Vertical lines per frame by paddle segment, top to bottom. Negative is
+    // up. Seven values (E Fig. 11, F vbc).
+    SEGMENT_VY: [-3, -2, -1, 0, 0, 1, 2, 3],
+    // Serve about 1.7 s after a point (E 1.12), from H 262 (F serve).
+    SERVE_FRAMES: 102,
+    SERVE_X: 182,
+    // First serve of a match (assumption R6): toward the player, vy +1.
+    FIRST_VY: 1,
+    WIN_SCORE: 11,
+    // Net at H 256, 4 lines on and 4 off (E 1.5).
+    NET_X: 176,
+    NET_DASH: 4,
+    // Sounds (Ho p67, E 1.11): paddle 491 Hz about 1 frame, wall 246 Hz
+    // about 16 ms, point 246 Hz about 240 ms.
+    SOUND: {
+      paddleHit: { freq: 491, ms: 17 },
+      wallHit: { freq: 246, ms: 16 },
+      point: { freq: 246, ms: 240 }
+    }
+  };
+})();
+
+/* ===== RULES ===== */
+// Pure match engine. step() runs one 60.05 Hz frame and returns events.
+PONG.RULES = (function () {
+  'use strict';
+  var C = PONG.CONST;
+  var PADDLE_MAX_Y = C.H - C.PADDLE_H;
+  var BALL_MAX_Y = C.H - C.BALL;
+
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  function speedFor(hits) {
+    if (hits >= C.HITS_FASTEST) return C.SPEEDS[2];
+    if (hits >= C.HITS_FAST) return C.SPEEDS[1];
+    return C.SPEEDS[0];
+  }
+
+  // Ball: x, y (top-left), dir (+1 right, -1 left), vy. While serveTimer > 0
+  // the ball is hidden and waits.
+  function createMatch() {
+    var mid = (C.H - C.PADDLE_H) >> 1;
+    return {
+      ball: { x: C.SERVE_X, y: (C.H - C.BALL) >> 1, dir: -1, vy: C.FIRST_VY },
+      paddles: { left: mid, right: mid },
+      score: { left: 0, right: 0 },
+      hits: 0,
+      serveTimer: C.SERVE_FRAMES,
+      over: false,
+      winner: null,
+      frame: 0
+    };
+  }
+
+  // Segment 0..7 of the paddle at the ball's center line.
+  function segmentAt(paddleY, ballY) {
+    return clamp((ballY + (C.BALL >> 1) - paddleY) >> 1, 0, 7);
+  }
+
+  function overlaps(paddleX, paddleY, b) {
+    return b.x < paddleX + C.PADDLE_W && b.x + C.BALL > paddleX &&
+      b.y < paddleY + C.PADDLE_H && b.y + C.BALL > paddleY;
+  }
+
+  // input: { left, right }, each a paddle move in lines this frame (+ is down).
+  function step(m, input) {
+    var ev = [];
+    m.frame++;
+    m.paddles.left = clamp(m.paddles.left + (input.left | 0), C.PADDLE_MIN_Y, PADDLE_MAX_Y);
+    m.paddles.right = clamp(m.paddles.right + (input.right | 0), C.PADDLE_MIN_Y, PADDLE_MAX_Y);
+    if (m.over) return ev;
+
+    var b = m.ball;
+    if (m.serveTimer > 0) {
+      if (--m.serveTimer === 0) {
+        b.x = C.SERVE_X;
+        ev.push({ type: 'serve', dir: b.dir });
+      }
+      return ev;
+    }
+
+    b.x += b.dir * speedFor(m.hits);
+    b.y += b.vy;
+    if (b.y < 0) {
+      b.y = -b.y;
+      b.vy = -b.vy;
+      ev.push({ type: 'wallHit' });
+    } else if (b.y > BALL_MAX_Y) {
+      b.y = 2 * BALL_MAX_Y - b.y;
+      b.vy = -b.vy;
+      ev.push({ type: 'wallHit' });
+    }
+
+    // A hit sets the direction away from the paddle, so the ball never sticks
+    // in a paddle (E 1.8). Speed 4 and widths 4 + 4 mean an overlap test at
+    // the new position never skips a paddle.
+    var side = b.dir < 0 ? 'left' : 'right';
+    var px = b.dir < 0 ? C.LEFT_X : C.RIGHT_X;
+    if (overlaps(px, m.paddles[side], b)) {
+      b.vy = C.SEGMENT_VY[segmentAt(m.paddles[side], b.y)];
+      b.dir = -b.dir;
+      m.hits = Math.min(m.hits + 1, C.HITS_FASTEST);
+      ev.push({ type: 'paddleHit', side: side });
+      return ev;
+    }
+
+    if (b.x + C.BALL <= 0 || b.x >= C.W) {
+      var scorer = b.x >= C.W ? 'left' : 'right';
+      m.score[scorer]++;
+      m.hits = 0;
+      // Direction, vertical position and velocity stay, so the serve goes
+      // toward the side that missed (P6, Ho p71-72).
+      ev.push({ type: 'point', scorer: scorer });
+      if (m.score[scorer] >= C.WIN_SCORE) {
+        m.over = true;
+        m.winner = scorer;
+        ev.push({ type: 'matchOver', winner: scorer });
+      } else {
+        m.serveTimer = C.SERVE_FRAMES;
+      }
+    }
+    return ev;
+  }
+
+  function ballVisible(m) { return !m.over && m.serveTimer === 0; }
+
+  return {
+    createMatch: createMatch, step: step, speedFor: speedFor,
+    segmentAt: segmentAt, ballVisible: ballVisible, PADDLE_MAX_Y: PADDLE_MAX_Y
+  };
+})();
+
+/* ===== DATA ===== */
+PONG.DATA = (function () {
+  'use strict';
+  // 5 x 7 block font. Each glyph is 7 rows, top first; bit 4 is the left
+  // column. Drawn as rectangles, so it stays pure white on black.
+  var FONT = {
+    A: [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11], B: [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+    C: [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E], D: [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+    E: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F], F: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+    G: [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F], H: [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+    I: [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E], J: [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+    K: [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11], L: [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+    M: [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11], N: [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
+    O: [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E], P: [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+    Q: [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D], R: [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+    S: [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E], T: [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+    U: [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E], V: [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+    W: [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A], X: [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+    Y: [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04], Z: [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+    '0': [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], '1': [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+    '2': [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], '3': [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
+    '4': [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02], '5': [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+    '6': [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E], '7': [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+    '8': [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], '9': [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+    '-': [0, 0, 0, 0x1F, 0, 0, 0], '.': [0, 0, 0, 0, 0, 0x0C, 0x0C],
+    ':': [0, 0x0C, 0x0C, 0, 0x0C, 0x0C, 0], '>': [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+    ' ': [0, 0, 0, 0, 0, 0, 0]
+  };
+
+  // Score digit segments in a 16 x 32 cell with 4-unit strokes (2.4 Score
+  // digits): [x, y, w, h] per segment a to g.
+  var SEGMENTS = {
+    a: [0, 0, 16, 4], b: [12, 0, 4, 16], c: [12, 16, 4, 16], d: [0, 28, 16, 4],
+    e: [0, 16, 4, 16], f: [0, 0, 4, 16], g: [0, 14, 16, 4]
+  };
+  var DIGIT_SEGMENTS = ['abcdef', 'bc', 'abged', 'abgcd', 'fgbc', 'afgcd', 'afgedc', 'abc', 'abcdefg', 'abcfgd'];
+
+  return { FONT: FONT, SEGMENTS: SEGMENTS, DIGIT_SEGMENTS: DIGIT_SEGMENTS };
+})();
+
+/* ===== VIEW ===== */
+// Pure renderer. Every function returns or extends a list of rectangles
+// [x, y, w, h] in native units, white on a black field. An optional fifth
+// value 0 draws the rectangle black.
+PONG.VIEW = (function () {
+  'use strict';
+  var C = PONG.CONST, D = PONG.DATA, R = PONG.RULES;
+  var GLYPH_W = 6;  // 5 columns and 1 space, in font pixels
+
+  // Draws str with font pixels of size px units; returns the list.
+  function text(out, str, x, y, px) {
+    for (var i = 0; i < str.length; i++) {
+      var g = D.FONT[str[i]] || D.FONT[' '];
+      for (var row = 0; row < 7; row++) {
+        for (var col = 0; col < 5; col++) {
+          if (g[row] & (0x10 >> col)) out.push([x + (i * GLYPH_W + col) * px, y + row * px, px, px]);
+        }
+      }
+    }
+    return out;
+  }
+
+  function textWidth(str, px) { return (str.length * GLYPH_W - 1) * px; }
+
+  function centered(out, str, y, px) {
+    return text(out, str, Math.round((C.W - textWidth(str, px)) / 2), y, px);
+  }
+
+  function digit(out, n, x, y) {
+    var segs = D.DIGIT_SEGMENTS[n];
+    for (var i = 0; i < segs.length; i++) {
+      var s = D.SEGMENTS[segs[i]];
+      out.push([x + s[0], y + s[1], s[2], s[3]]);
+    }
+  }
+
+  // Score in a 64-unit window: two 32-unit cells, digit in the right half
+  // of each cell. The leading zero is blank (M, Ho p61).
+  function score(out, n, windowX) {
+    if (n >= 10) digit(out, Math.floor(n / 10) % 10, windowX + 16, 16);
+    digit(out, n % 10, windowX + 48, 16);
+  }
+
+  function net(out) {
+    for (var y = 0; y < C.H; y += C.NET_DASH * 2) out.push([C.NET_X, y, 1, Math.min(C.NET_DASH, C.H - y)]);
+  }
+
+  // The play field. opts.label: text drawn in the middle (PAUSE).
+  function renderMatch(m, opts) {
+    var out = [];
+    net(out);
+    score(out, m.score.left, 48);
+    score(out, m.score.right, 240);
+    out.push([C.LEFT_X, m.paddles.left, C.PADDLE_W, C.PADDLE_H]);
+    out.push([C.RIGHT_X, m.paddles.right, C.PADDLE_W, C.PADDLE_H]);
+    if (R.ballVisible(m)) out.push([m.ball.x, m.ball.y, C.BALL, C.BALL]);
+    if (opts && opts.label) {
+      var w = textWidth(opts.label, 3);
+      // A fifth value 0 draws black: a box that clears the field behind the label.
+      out.push([Math.round((C.W - w) / 2) - 6, 108, w + 12, 33, 0]);
+      centered(out, opts.label, 114, 3);
+    }
+    return out;
+  }
+
+  function pad(str, n) { while (str.length < n) str = ' ' + str; return str; }
+
+  // Top 10 rows (S9, PH4): rank, initials and margin. No difficulty.
+  // Empty rows show dashes (assumption R3).
+  function top10Rows(scores) {
+    var rows = [];
+    for (var i = 0; i < 10; i++) {
+      var e = scores[i];
+      rows.push(pad(String(i + 1), 2) + '. ' + (e ? e.name + ' ' + pad(String(e.score), 2) : '--- --'));
+    }
+    return rows;
+  }
+
+  // Title (PF1): PONG, the difficulty selector, the Top 10 and a blinking
+  // PRESS ENTER. s: { level, levels, scores, blinkOn }.
+  function renderTitle(s) {
+    var out = [];
+    centered(out, 'PONG', 10, 6);
+    var centers = [94, 188, 282];
+    for (var i = 0; i < s.levels.length; i++) {
+      var word = s.levels[i].toUpperCase();
+      var w = textWidth(word, 2), x = centers[i] - (w >> 1);
+      text(out, word, x, 64, 2);
+      if (s.levels[i] === s.level) out.push([x - 3, 82, w + 6, 2]);
+    }
+    centered(out, 'TOP 10', 94, 2);
+    var rows = top10Rows(s.scores);
+    var rowX = Math.round((C.W - textWidth(rows[0], 1)) / 2);
+    for (var r = 0; r < rows.length; r++) text(out, rows[r], rowX, 112 + r * 9, 1);
+    if (s.blinkOn) centered(out, 'PRESS ENTER', 210, 2);
+    return out;
+  }
+
+  // Name entry (S7): the winning margin, 3 letters and a bar under the
+  // current slot. ne: { letters, slot }.
+  function renderNameEntry(ne, margin) {
+    var out = [];
+    centered(out, 'YOU WIN BY ' + margin, 30, 2);
+    centered(out, 'ENTER YOUR INITIALS', 62, 2);
+    var px = 6, cell = 6 * px, x0 = Math.round((C.W - 3 * cell + px) / 2);
+    for (var i = 0; i < 3; i++) {
+      text(out, ne.letters[i], x0 + i * cell, 100, px);
+      if (i === ne.slot) out.push([x0 + i * cell, 148, 5 * px, 3]);
+    }
+    return out;
+  }
+
+  return {
+    text: text, textWidth: textWidth, centered: centered, renderMatch: renderMatch, score: score, net: net,
+    top10Rows: top10Rows, renderTitle: renderTitle, renderNameEntry: renderNameEntry
+  };
+})();
+/* ===== APP ===== */
+PONG.APP = (function () {
+  'use strict';
+  var C = PONG.CONST, R = PONG.RULES;
+
+  // What a player sees from one side: the ball (when shown), which way it
+  // moves, and the own paddle. No future serve or hidden state (plan Phase 3).
+  function playerView(m, side) {
+    var b = m.ball;
+    return {
+      side: side,
+      ballVisible: R.ballVisible(m),
+      ballY: b.y,
+      ballX: b.x,
+      toward: b.dir === (side === 'right' ? 1 : -1),
+      paddleY: m.paddles[side]
+    };
+  }
+
+  // Controller (plan decision 12): reaction (frames before it reacts to a
+  // ball that turns toward it), speed (lines per frame), error (random aim
+  // offset in lines, drawn once per return) and aim (chance to return the
+  // ball upward). The aim parameter was added in tuning: error alone could
+  // not lift the CPU win rate above about 70%.
+  // move(view) returns the paddle move for this frame.
+  function createTracker(params, rng) {
+    var wasToward = false, wait = 0, offset = 0;
+    var center = (C.H - C.PADDLE_H) >> 1;
+    return {
+      move: function (v) {
+        var toward = v.ballVisible && v.toward;
+        if (toward && !wasToward) {
+          wait = params.reaction;
+          offset = Math.round((rng() * 2 - 1) * params.error);
+          // aim: chance to return the ball upward, toward the top strip
+          // the far paddle cannot reach (P5).
+          if (params.aim && rng() < params.aim) offset = Math.abs(offset);
+        }
+        wasToward = toward;
+        var target;
+        if (toward) {
+          if (wait > 0) { wait--; return 0; }
+          target = v.ballY + (C.BALL >> 1) + offset - (C.PADDLE_H >> 1);
+        } else {
+          target = center;
+        }
+        var d = target - v.paddleY;
+        return d > params.speed ? params.speed : d < -params.speed ? -params.speed : d;
+      }
+    };
+  }
+
+  // CPU levels (PD1: only CPU behavior changes). Tuned in
+  // tests/unit/pong-cpu.test.mjs, 300 seeded matches each, one random
+  // stream per side. CPU win rate against the reference bot: easy 12.3%,
+  // normal 53.0%, hard 86.0%. The new-player bot beats easy in 93.0%.
+  var DIFFICULTY = {
+    easy: { reaction: 16, speed: 3, error: 9, aim: 0 },
+    normal: { reaction: 10, speed: 3, error: 8, aim: 0 },
+    hard: { reaction: 4, speed: 4, error: 7, aim: 0.3 }
+  };
+  var LEVELS = ['easy', 'normal', 'hard'];
+
+  function createCpu(level, rng) { return createTracker(DIFFICULTY[level], rng); }
+
+  // Keyboard paddle speed in lines per frame: about 1 s top to bottom
+  // (assumption R7). The original used a knob.
+  var PLAYER_SPEED = 4;
+
+  // Final score hold (PF3, assumption): 3 seconds.
+  var FINAL_FRAMES = Math.round(3 * C.FPS);
+  // PRESS ENTER blinks on for 32 frames, off for 32.
+  var BLINK_FRAMES = 32;
+  var MAX_SCORE = C.WIN_SCORE;
+
+  // Winning margin on a player win, else 0 (PH1, PH2).
+  function marginOf(m) {
+    return m.winner === 'left' ? m.score.left - m.score.right : 0;
+  }
+
+  // Up and Down move the marker, no wrap (PF1).
+  function levelMove(level, p) {
+    var i = LEVELS.indexOf(level);
+    if (p.up && i > 0) i--;
+    else if (p.down && i < LEVELS.length - 1) i++;
+    return LEVELS[i];
+  }
+
+  // ---- Screen state machine: title, play, final, nameEntry.
+  // opts: { rng, store }. store may be null. After each step, app.sounds
+  // lists the sound events of that frame.
+  function createApp(opts) {
+    var store = opts.store;
+    var V = PONG.VIEW;
+    function load(name, validate, fallback) { return store ? store.load(name, validate, fallback) : fallback(); }
+    var app = {
+      screen: 'title',
+      soundOn: load('sound', ARCADE.validateSound, function () { return true; }),
+      scores: load('scores', function (v) { return ARCADE.validateScores(v, MAX_SCORE); }, function () { return []; }),
+      level: 'normal',  // Normal on each load (assumption), not saved
+      match: null,
+      cpu: null,
+      paused: false,
+      timer: 0,
+      margin: 0,
+      nameEntry: null,
+      sounds: [],
+      frame: 0
+    };
+
+    function startMatch() {
+      app.match = R.createMatch();
+      app.cpu = createCpu(app.level, opts.rng);
+      app.paused = false;
+      app.screen = 'play';
+    }
+
+    function stepPlay(inp) {
+      if (inp.pressed.start) app.paused = !app.paused;
+      if (app.paused) return;
+      var h = inp.held;
+      var move = ((h.down ? 1 : 0) - (h.up ? 1 : 0)) * PLAYER_SPEED;
+      var ev = R.step(app.match, { left: move, right: app.cpu.move(playerView(app.match, 'right')) });
+      for (var i = 0; i < ev.length; i++) if (C.SOUND[ev[i].type]) app.sounds.push(ev[i].type);
+      if (app.match.over) {
+        app.screen = 'final';
+        app.timer = FINAL_FRAMES;
+      }
+    }
+
+    function stepFinal() {
+      if (app.paused) return;
+      if (--app.timer > 0) return;
+      app.margin = marginOf(app.match);
+      app.paused = false;
+      if (ARCADE.qualifies(app.scores, app.margin)) {
+        app.nameEntry = ARCADE.createNameEntry('down', 'up');
+        app.screen = 'nameEntry';
+      } else {
+        app.screen = 'title';
+      }
+    }
+
+    function stepNameEntry(inp) {
+      var name = app.nameEntry.step(inp);
+      if (name === null) return;
+      app.scores = ARCADE.insertScore(app.scores, { name: name, score: app.margin }).list;
+      if (store) store.save('scores', app.scores);
+      app.screen = 'title';
+    }
+
+    app.step = function (inp) {
+      app.sounds = [];
+      app.frame++;
+      var p = inp.pressed;
+      if (p.sound) {
+        app.soundOn = !app.soundOn;
+        if (store) store.save('sound', app.soundOn);
+      }
+      if (app.screen === 'title') {
+        if (p.start) startMatch();
+        else app.level = levelMove(app.level, p);
+      } else if (app.screen === 'play') {
+        stepPlay(inp);
+      } else if (app.screen === 'final') {
+        stepFinal();
+      } else if (app.screen === 'nameEntry') {
+        stepNameEntry(inp);
+      }
+    };
+
+    // Blur or hidden tab (S11). Play stays paused until Enter (E5); the
+    // final-score hold resumes when the page is back (app.resume).
+    app.pause = function () { if (app.screen === 'play' || app.screen === 'final') app.paused = true; };
+
+    app.resume = function () { if (app.screen === 'final') app.paused = false; };
+
+    app.audioPaused = function () { return (app.screen === 'play' || app.screen === 'final') && app.paused; };
+
+    app.render = function () {
+      if (app.screen === 'play') return V.renderMatch(app.match, { label: app.paused ? 'PAUSE' : '' });
+      if (app.screen === 'final') return V.renderMatch(app.match, {});
+      if (app.screen === 'nameEntry') return V.renderNameEntry(app.nameEntry, app.margin);
+      return V.renderTitle({
+        level: app.level, levels: LEVELS, scores: app.scores,
+        blinkOn: Math.floor(app.frame / BLINK_FRAMES) % 2 === 0
+      });
+    };
+
+    app.footerKeys = function () {
+      var ud = '\u2191 \u2193';
+      if (app.screen === 'title') return [[ud, 'LEVEL'], ['ENTER', 'START']];
+      if (app.screen === 'nameEntry') return [[ud, 'LETTER'], ['ENTER', 'NEXT']];
+      if (app.screen === 'final') return [];             // the final score takes no keys
+      return [[ud, 'MOVE'], ['ENTER', 'PAUSE']];
+    };
+
+    return app;
+  }
+
+  return {
+    playerView: playerView, createTracker: createTracker, createCpu: createCpu,
+    DIFFICULTY: DIFFICULTY, LEVELS: LEVELS, PLAYER_SPEED: PLAYER_SPEED, FINAL_FRAMES: FINAL_FRAMES,
+    marginOf: marginOf, levelMove: levelMove, createApp: createApp
+  };
+})();
+/* ==END LOGIC== */
+</script>
+<script>
+/* ===== ARCADE PLATFORM ===== */
+// Shared browser layer. pong.html and space-invaders.html hold the same copy
+// of this section: canvas fit, footer, loop, keyboard, blur and audio.
+var ARCADE_PLATFORM = (function () {
+  'use strict';
+
+  // Keeps the canvas at aspect w:h, as large as fits in the stage. The stage
+  // background gives the black margins (requirements S3). onSize gets the
+  // shown size in CSS pixels and the device pixel ratio.
+  function fitCanvas(stage, canvas, w, h, onSize) {
+    function fit() {
+      var k = Math.min(stage.clientWidth / w, stage.clientHeight / h);
+      var cw = Math.max(1, Math.floor(w * k)), ch = Math.max(1, Math.floor(h * k));
+      canvas.style.width = cw + 'px';
+      canvas.style.height = ch + 'px';
+      onSize(cw, ch, window.devicePixelRatio || 1);
+    }
+    fit();
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(stage);
+    window.addEventListener('resize', fit);
+  }
+
+  // Footer (S12): keys, the M key with the sound state and the storage
+  // notice. Rebuilt only when something changes. keys: [[key, label], ...].
+  function createFooter(keysEl, soundEl, noticeEl) {
+    var last = '';
+    return function update(keys, soundOn, storeOk) {
+      var sig = JSON.stringify([keys, soundOn, storeOk]);
+      if (sig === last) return;
+      last = sig;
+      keysEl.textContent = '';
+      keys.forEach(function (k) {
+        var span = document.createElement('span');
+        span.className = 'item';
+        var kbd = document.createElement('kbd');
+        kbd.textContent = k[0];
+        span.appendChild(kbd);
+        span.appendChild(document.createTextNode(' ' + k[1]));
+        keysEl.appendChild(span);
+      });
+      soundEl.textContent = '';
+      var m = document.createElement('kbd');
+      m.textContent = 'M';
+      soundEl.appendChild(m);
+      soundEl.appendChild(document.createTextNode(' SOUND: ' + (soundOn ? 'ON' : 'OFF')));
+      noticeEl.hidden = storeOk;
+    };
+  }
+
+  // Runs step() at the fixed game rate and render() once per animation frame.
+  function startLoop(fps, step, render) {
+    var ticker = ARCADE.createTicker(fps, 5);
+    function frame(now) {
+      var n = ticker.advance(now);
+      for (var i = 0; i < n; i++) step();
+      render();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    return ticker;
+  }
+
+  // Keyboard, blur and visibility. onAway runs when the page loses focus or
+  // is hidden (S11); onBack runs when it has focus and is visible again.
+  function bindInput(input, onAway, onBack) {
+    window.addEventListener('keydown', function (e) {
+      if (input.keyDown(e)) e.preventDefault();
+    });
+    window.addEventListener('keyup', function (e) {
+      if (input.keyUp(e)) e.preventDefault();
+    });
+    window.addEventListener('blur', onAway);
+    // Resume only when the page is both visible and focused.
+    function back() { if (!document.hidden && document.hasFocus()) onBack(); }
+    window.addEventListener('focus', back);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) onAway(); else back();
+    });
+  }
+
+  // ---- Audio (S5): synthesized effects only. The AudioContext is made on
+  // the first key press (browsers block autoplay). Any WebAudio failure
+  // leaves the game silent. While muted or paused, no new sound starts.
+  function createAudio() {
+    var ctx = null, master = null, noiseBuf = null;
+    var failed = false, muted = false, paused = false;
+    var loops = {};
+
+    function unlock() {
+      if (ctx || failed) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { failed = true; return; }
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = muted ? 0 : 1;
+        master.connect(ctx.destination);
+        // Some browsers start the context suspended.
+        if (paused) ctx.suspend();
+        else if (ctx.state === 'suspended') ctx.resume();
+      } catch (e) {
+        failed = true;
+        ctx = null;
+      }
+    }
+
+    function live() { return !!ctx && !failed && !muted && !paused; }
+
+    function envelope(g, t, end, level, decay) {
+      g.gain.setValueAtTime(level, t);
+      if (decay) g.gain.linearRampToValueAtTime(0, end);
+      else g.gain.setValueAtTime(level, end);
+    }
+
+    // A tone at freq Hz for ms milliseconds. opts: type (default square),
+    // gain, endFreq (slide), decay (fade to 0).
+    function tone(freq, ms, opts) {
+      if (!live()) return;
+      opts = opts || {};
+      try {
+        var t = ctx.currentTime, end = t + ms / 1000;
+        var osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = opts.type || 'square';
+        osc.frequency.value = freq;
+        osc.frequency.setValueAtTime(freq, t);
+        if (opts.endFreq) osc.frequency.linearRampToValueAtTime(opts.endFreq, end);
+        envelope(g, t, end, opts.gain || 0.12, opts.decay);
+        osc.connect(g);
+        g.connect(master);
+        osc.start(t);
+        osc.stop(end);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // Filtered white noise for ms milliseconds. opts: gain, filter (low-pass
+    // cut-off in Hz), decay.
+    function noise(ms, opts) {
+      if (!live()) return;
+      opts = opts || {};
+      try {
+        if (!noiseBuf) {
+          noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+          var d = noiseBuf.getChannelData(0);
+          for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+        var t = ctx.currentTime, end = t + ms / 1000;
+        var src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+        src.buffer = noiseBuf;
+        src.loop = true;
+        f.type = 'lowpass';
+        f.frequency.value = opts.filter || 2000;
+        envelope(g, t, end, opts.gain || 0.2, opts.decay !== false);
+        src.connect(f);
+        f.connect(g);
+        g.connect(master);
+        src.start(t);
+        src.stop(end);
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    // A continuous tone until stopLoop(id). Calling loop again for a live id
+    // does nothing. opts: type, gain, lfoHz and lfoDepth (pitch warble).
+    function loop(id, freq, opts) {
+      if (!live() || loops[id]) return;
+      opts = opts || {};
+      try {
+        var osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = opts.type || 'square';
+        osc.frequency.value = freq;
+        g.gain.value = opts.gain || 0.08;
+        var nodes = [osc];
+        if (opts.lfoHz) {
+          var lfo = ctx.createOscillator(), depth = ctx.createGain();
+          lfo.frequency.value = opts.lfoHz;
+          depth.gain.value = opts.lfoDepth || freq / 4;
+          lfo.connect(depth);
+          depth.connect(osc.frequency);
+          lfo.start();
+          nodes.push(lfo);
+        }
+        osc.connect(g);
+        g.connect(master);
+        osc.start();
+        loops[id] = nodes;
+      } catch (e) {
+        failed = true;
+      }
+    }
+
+    function stopLoop(id) {
+      var nodes = loops[id];
+      if (!nodes) return;
+      delete loops[id];
+      nodes.forEach(function (n) { try { n.stop(); } catch (e) { /* already stopped */ } });
+    }
+
+    function stopAllLoops() { Object.keys(loops).forEach(stopLoop); }
+
+    function setMuted(m) {
+      if (m === muted) return;
+      muted = m;
+      if (m) stopAllLoops();
+      if (!ctx) return;
+      try { master.gain.value = m ? 0 : 1; } catch (e) { failed = true; }
+    }
+
+    // Pause and hidden tab suspend the context (S11).
+    function setPaused(p) {
+      if (p === paused) return;
+      paused = p;
+      if (p) stopAllLoops();
+      if (!ctx) return;
+      try { if (p) ctx.suspend(); else ctx.resume(); } catch (e) { failed = true; }
+    }
+
+    return {
+      unlock: unlock, tone: tone, noise: noise, loop: loop, stopLoop: stopLoop,
+      setMuted: setMuted, setPaused: setPaused
+    };
+  }
+
+  return {
+    fitCanvas: fitCanvas, createFooter: createFooter, startLoop: startLoop,
+    bindInput: bindInput, createAudio: createAudio
+  };
+})();
+
+/* ===== PLATFORM ===== */
+var PLATFORM = (function () {
+  'use strict';
+  var C = PONG.CONST;
+
+  // Maps native units to device pixels. Every edge is rounded to a whole
+  // pixel and nothing is smoothed, so only pure black and white pixels
+  // exist (S2, S3).
+  function createScreen(canvas) {
+    var ctx = canvas.getContext('2d');
+
+    function resize(cssW, cssH, dpr) {
+      var w = Math.max(1, Math.round(cssW * dpr)), h = Math.max(1, Math.round(cssH * dpr));
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    }
+
+    function draw(rects) {
+      var sx = canvas.width / C.W, sy = canvas.height / C.H;
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (var i = 0; i < rects.length; i++) {
+        var r = rects[i];
+        var x0 = Math.round(r[0] * sx), y0 = Math.round(r[1] * sy);
+        var x1 = Math.max(x0 + 1, Math.round((r[0] + r[2]) * sx));
+        var y1 = Math.max(y0 + 1, Math.round((r[1] + r[3]) * sy));
+        ctx.fillStyle = r[4] === 0 ? '#000' : '#fff';
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+
+    return { resize: resize, draw: draw };
+  }
+
+  return { createScreen: createScreen };
+})();
+
+/* ===== BOOT ===== */
+(function () {
+  'use strict';
+  var C = PONG.CONST;
+  var canvas = document.getElementById('screen');
+  var screen = PLATFORM.createScreen(canvas);
+  ARCADE_PLATFORM.fitCanvas(document.getElementById('stage'), canvas, 4, 3, screen.resize);
+  var footer = ARCADE_PLATFORM.createFooter(document.getElementById('keys'),
+    document.getElementById('sound'), document.getElementById('notice'));
+  var store = ARCADE.createStore(function () { return window.localStorage; }, 'pong.v1.');
+  var app = PONG.APP.createApp({ rng: Math.random, store: store });
+  var input = ARCADE.createInput({
+    ArrowUp: 'up', ArrowDown: 'down', Enter: 'start', NumpadEnter: 'start', KeyM: 'sound'
+  });
+  var audio = ARCADE_PLATFORM.createAudio();
+  window.addEventListener('keydown', function () { audio.unlock(); }, true);
+  var ticker = ARCADE_PLATFORM.startLoop(C.FPS, function () {
+    app.step(input.frame());
+    audio.setMuted(!app.soundOn);
+    audio.setPaused(app.audioPaused());
+    for (var i = 0; i < app.sounds.length; i++) {
+      var s = C.SOUND[app.sounds[i]];
+      audio.tone(s.freq, s.ms);
+    }
+  }, function () {
+    screen.draw(app.render());
+    footer(app.footerKeys(), app.soundOn, store.ok);
+  });
+  ARCADE_PLATFORM.bindInput(input, function () {
+    input.clear();
+    app.pause();
+    audio.setPaused(app.audioPaused());
+  }, function () {
+    ticker.reset();
+    app.resume();
+  });
+  // Read-only handle for end-to-end tests.
+  window.pongApp = app;
+})();
+</script>
+</body>
+</html>
