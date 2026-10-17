@@ -86,7 +86,7 @@ Approximate check values from secondary notes (ROM governs): player shot about 2
 - When a side reaches 11, the final score stays on screen for 3 seconds *(default)*. If the player won and the margin qualifies, name entry follows. Then back to the title.
 
 ### 4.2 Controls
-- Up and Down arrows move the player paddle (left side).
+- Up and Down arrows move the player paddle (left side). **Amended 2026-10-17 (owner decision O3):** right side.
 - Enter starts and pauses. M toggles sound.
 - Name entry: Up and Down change the letter. Enter accepts.
 

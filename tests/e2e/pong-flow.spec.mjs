@@ -20,7 +20,7 @@ async function playTo(page, { player, cpu, level }) {
     const playerWins = p > c;
     m.score = { left: playerWins ? c : c - 1, right: playerWins ? p - 1 : p };
     m.serveTimer = 0;
-    m.paddles = { player: 230, cpu: 230 };
+    m.paddles = { left: 230, right: 230 };
     Object.assign(m.ball, playerWins ? { x: 2, y: 20, dir: -1, vy: 0 } : { x: 370, y: 20, dir: 1, vy: 0 });
     // Keep the CPU paddle away from the ball.
     pongApp.cpu = { move: () => 4 };
