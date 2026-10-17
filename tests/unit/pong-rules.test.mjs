@@ -118,7 +118,7 @@ test('R6: the first serve goes toward the player with vy +1 after the delay', ()
   const m = R.createMatch();
   const { f } = runUntil(m, has('serve'));
   assert.equal(f, C.SERVE_FRAMES);
-  assert.equal(m.ball.dir, -1);
+  assert.equal(m.ball.dir, 1, 'toward the player on the right');
   assert.equal(m.ball.vy, 1);
 });
 
