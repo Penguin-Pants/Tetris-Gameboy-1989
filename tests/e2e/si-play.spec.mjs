@@ -142,12 +142,17 @@ test('IK1/IK2: arrows move the cannon; holding Space fires once', async ({ page 
   await page.keyboard.up('ArrowLeft');
   expect(await page.evaluate(() => siApp.game.playerXr)).toBeLessThan(x1);
   // Hold fire for 3 seconds: one shot is removed, no second shot starts.
+  // Alien fire is held off so the cannon is not hit during the test.
+  const holdFire = () => page.evaluate(() => { siApp.game.enableAlienFire = 0; siApp.game.alienFireDelay = 255; });
+  await holdFire();
   const c0 = await page.evaluate(() => siApp.game.shotCount);
   await page.keyboard.down('Space');
   await page.waitForTimeout(3000);
   expect(await page.evaluate(() => siApp.game.shotCount)).toBe(c0 + 1);
   expect(await page.evaluate(() => siApp.game.shot.status)).toBe(0);
   await page.keyboard.up('Space');
-  await page.keyboard.press('Space');
+  await holdFire();
+  await page.waitForTimeout(100);                 // the release must be seen for a frame
+  await page.keyboard.press('Space', { delay: 50 });
   await page.waitForFunction(() => siApp.game.shot.status !== 0);
 });

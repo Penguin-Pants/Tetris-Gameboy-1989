@@ -1553,39 +1553,106 @@ SI.VIEW = (function () {
     }
   }
 
+  function prompt(fb, on) { if (on) centered(fb, 'PRESS ENTER', 216); }
+
+  // Attract screens (IF1). page 0: title (0B05, 0ACF positions); page 1:
+  // score advance table (DrawAdvTable 1815, tables 1DBE and 1DCF); page 2:
+  // Top 10 (S9). o: { score, hi, scores, prompt }.
+  function renderAttract(fb, page, o) {
+    clear(fb);
+    hud(fb, { score: o.score, hi: o.hi });
+    if (page === 0) {
+      text(fb, D.TEXT.PLAY, 96, 64);
+      text(fb, D.TEXT.INVADERS, 56, 88);
+    } else if (page === 1) {
+      text(fb, D.TEXT.ADVANCE, 32, 120);
+      var rows = [[D.SAUCER.slice(4, 20), D.TEXT.MYSTERY], [D.ALIENS[2][0], D.TEXT.PTS30],
+        [D.ALIENS[1][1], D.TEXT.PTS20], [D.ALIENS[0][0], D.TEXT.PTS10]];
+      for (var i = 0; i < rows.length; i++) {
+        columns(fb, rows[i][0], 64, 136 + 16 * i);
+        text(fb, rows[i][1], 80, 136 + 16 * i);
+      }
+    } else {
+      centered(fb, 'HIGH SCORES', 64);
+      for (var r = 0; r < ARCADE.MAX_ENTRIES; r++) {
+        var e = o.scores[r];
+        var line = (r < 9 ? ' ' : '') + (r + 1) + '. ' + (e ? e.name + ' ' + digits4(e.score) : '--- ----');
+        text(fb, line, 64, 88 + 12 * r);
+      }
+    }
+    prompt(fb, o.prompt);
+  }
+
+  // Name entry (S7, IK3). o: { score, hi, blink }.
+  function renderNameEntry(fb, ne, o) {
+    clear(fb);
+    hud(fb, { score: o.score, hi: o.hi });
+    centered(fb, 'ENTER YOUR INITIALS', 96);
+    centered(fb, 'SCORE ' + digits4(o.score), 120);
+    for (var k = 0; k < ARCADE.NAME_LEN; k++) {
+      if (k > ne.slot) continue;
+      if (k === ne.slot && !o.blink) continue;
+      text(fb, ne.letters[k], 88 + 16 * k, 144);
+    }
+    for (var u = 0; u < ARCADE.NAME_LEN; u++) text(fb, '-', 88 + 16 * u, 154);
+    centered(fb, '< > LETTER  ENTER OK', 184);
+  }
+
   return {
     createFramebuffer: createFramebuffer, clear: clear, text: text, centered: centered,
-    columns: columns, hud: hud, renderPlay: renderPlay, blitGame: blitGame, digits4: digits4, W: W, H: H
+    columns: columns, hud: hud, renderPlay: renderPlay, renderAttract: renderAttract,
+    renderNameEntry: renderNameEntry, blitGame: blitGame, digits4: digits4, W: W, H: H
   };
 })();
 
 /* ===== APP ===== */
-// Screen state machine. Phase 8 holds a temporary flow: Enter starts a
-// game; after game over the screen goes back to the start screen.
+// Screen state machine: attract loop, play, game-over banner, name entry.
 SI.APP = (function () {
   'use strict';
-  var C = SI.CONST, R = SI.RULES, V = SI.VIEW;
+  var C = SI.CONST, R = SI.RULES, V = SI.VIEW, D = SI.DATA;
 
-  // Fixed keys (IK1, IK2, S4).
+  // Fixed keys (IK1 to IK3, S4).
   var KEY_MAP = { ArrowLeft: 'left', ArrowRight: 'right', Space: 'fire', Enter: 'start', KeyM: 'sound' };
   var FOOTER_KEYS = [['← →', 'MOVE'], ['SPACE', 'FIRE'], ['ENTER', 'START/PAUSE'], ['M', 'SOUND']];
+  var PAGE_FRAMES = 7 * C.FPS;        // IF1 (default): each attract screen about 7 s
+  var PAGES = 3;                      // Title, score advance table, Top 10
+  var BLINK_FRAMES = 32;              // PRESS ENTER on 32 frames, off 32 frames
   var BANNER_FRAMES = 3 * C.FPS;      // IF3 (default): game-over banner
+
+  function validScores(v) { return ARCADE.validateScores(v, C.MAX_SCORE); }
 
   function createApp(opts) {
     var store = opts.store;
     var app = {
-      screen: 'title',
-      game: null,
-      paused: false,
+      screen: 'attract',
+      page: 0,
       timer: 0,
       frame: 0,
+      game: null,
+      paused: false,
+      lastScore: 0,
+      nameEntry: null,
+      scores: store.load('scores', validScores, function () { return []; }),
       soundOn: store.load('sound', ARCADE.validateSound, function () { return true; }),
       store: store
     };
 
-    app.hiScore = function () { return 0; };
+    // HI-SCORE (I11): the first Top 10 entry, or 0.
+    app.hiScore = function () { return app.scores.length ? app.scores[0].score : 0; };
 
     app.pause = function () { if (app.screen === 'play') app.paused = true; };
+
+    function toAttract(page) {
+      app.screen = 'attract';
+      app.page = page;
+      app.timer = 0;
+    }
+
+    function startGame() {
+      app.game = R.createGame();
+      app.paused = false;
+      app.screen = 'play';
+    }
 
     // inp: { held, pressed } from ARCADE.createInput. Returns sound events.
     app.step = function (inp) {
@@ -1595,23 +1662,42 @@ SI.APP = (function () {
         app.soundOn = !app.soundOn;
         store.save('sound', app.soundOn);
       }
-      if (app.screen === 'title') {
-        if (p.start) {
-          app.game = R.createGame();
-          app.paused = false;
-          app.screen = 'play';
-        }
-      } else if (app.screen === 'play') {
-        if (p.start) app.paused = !app.paused;
-        if (!app.paused) {
+      switch (app.screen) {
+        case 'attract':
+          if (p.start) { startGame(); break; }
+          if (++app.timer >= PAGE_FRAMES) { app.page = (app.page + 1) % PAGES; app.timer = 0; }
+          break;
+        case 'play':
+          if (p.start) app.paused = !app.paused;
+          if (app.paused) break;
           events = R.step(app.game, { left: h.left, right: h.right, fire: h.fire });
           for (var i = 0; i < events.length; i++) {
-            if (events[i].type === 'gameOver') { app.screen = 'gameOver'; app.timer = 0; }
+            if (events[i].type === 'gameOver') {
+              app.lastScore = app.game.score;
+              app.screen = 'gameOver';
+              app.timer = 0;
+            }
           }
-        }
-      } else if (app.screen === 'gameOver') {
-        R.step(app.game, {});
-        if (++app.timer >= BANNER_FRAMES) app.screen = 'title';
+          break;
+        case 'gameOver':
+          R.step(app.game, {});
+          if (++app.timer < BANNER_FRAMES) break;
+          if (ARCADE.qualifies(app.scores, app.lastScore)) {
+            app.nameEntry = ARCADE.createNameEntry('left', 'right');
+            app.screen = 'nameEntry';
+          } else {
+            toAttract(0);
+          }
+          break;
+        case 'nameEntry':
+          var name = app.nameEntry.step(inp);
+          if (name !== null) {
+            app.scores = ARCADE.insertScore(app.scores, { name: name, score: app.lastScore }).list;
+            store.save('scores', app.scores);
+            app.nameEntry = null;
+            toAttract(2);
+          }
+          break;
       }
       return events;
     };
@@ -1624,20 +1710,26 @@ SI.APP = (function () {
     // True while game sound must be held (pause).
     app.audioPaused = function () { return app.screen === 'play' && app.paused; };
 
+    // True on the frames where PRESS ENTER shows.
+    app.blinkOn = function () { return ((app.frame / BLINK_FRAMES) | 0) % 2 === 0; };
+
     app.render = function (fb) {
-      if (app.screen === 'title') {
-        V.clear(fb);
-        V.hud(fb, { score: app.game ? app.game.score : 0, hi: app.hiScore() });
-        if ((app.frame >> 5) & 1) V.centered(fb, 'PRESS ENTER', 128);
-        return;
+      if (app.screen === 'play' || app.screen === 'gameOver') {
+        V.renderPlay(fb, app.game, { hi: app.hiScore(), label: app.paused ? 'PAUSE' : '' });
+      } else if (app.screen === 'attract') {
+        V.renderAttract(fb, app.page, { score: app.lastScore, hi: app.hiScore(), scores: app.scores, prompt: app.blinkOn() });
+      } else {
+        V.renderNameEntry(fb, app.nameEntry, { score: app.lastScore, hi: app.hiScore(), blink: app.blinkOn() });
       }
-      V.renderPlay(fb, app.game, { hi: app.hiScore(), label: app.paused ? 'PAUSE' : '' });
     };
 
     return app;
   }
 
-  return { KEY_MAP: KEY_MAP, FOOTER_KEYS: FOOTER_KEYS, createApp: createApp, BANNER_FRAMES: BANNER_FRAMES };
+  return {
+    KEY_MAP: KEY_MAP, FOOTER_KEYS: FOOTER_KEYS, createApp: createApp,
+    PAGE_FRAMES: PAGE_FRAMES, BLINK_FRAMES: BLINK_FRAMES, BANNER_FRAMES: BANNER_FRAMES
+  };
 })();
 /* ==END LOGIC== */
 </script>
