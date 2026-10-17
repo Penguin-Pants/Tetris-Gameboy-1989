@@ -132,6 +132,7 @@ var ARCADE = (function () {
   // may throw. Any error after the probe, and any corrupt value (bad JSON or
   // a validator that returns null), drops the backend for the session: ok
   // becomes false and later loads and saves use memory only (requirements S10).
+  // A corrupt value is removed first, so the next session starts clean.
   function createStore(getBackend, prefix) {
     var store = { ok: true };
     var memory = {};
@@ -157,7 +158,12 @@ var ARCADE = (function () {
       if (raw === null || raw === undefined) return fallback();
       var value = null;
       try { value = validate(JSON.parse(raw)); } catch (e) { value = null; }
-      if (value === null) { fail(); return fallback(); }
+      if (value === null) {
+        // Remove the corrupt value so a later session can save again.
+        if (backend) { try { backend.removeItem(prefix + name); } catch (e) { /* drop below */ } }
+        fail();
+        return fallback();
+      }
       return value;
     };
 

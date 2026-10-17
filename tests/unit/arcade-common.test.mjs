@@ -166,6 +166,19 @@ for (const { file, ns } of ARCADE_FILES) {
     }
   });
 
+  test(`${file}: S10 a corrupt value is removed, so the next session saves again`, () => {
+    const b = fakeBackend({}, { 'x.scores': '{bad' });
+    const s1 = A.createStore(() => b, 'x.');
+    assert.deepEqual(s1.load('scores', (v) => A.validateScores(v, 11), () => []), []);
+    assert.equal(s1.ok, false);
+    assert.equal('x.scores' in b.data, false, 'corrupt key removed');
+    const s2 = A.createStore(() => b, 'x.');
+    assert.deepEqual(s2.load('scores', (v) => A.validateScores(v, 11), () => []), []);
+    assert.equal(s2.ok, true);
+    s2.save('scores', [entry('ABC', 3)]);
+    assert.deepEqual(A.createStore(() => b, 'x.').load('scores', (v) => A.validateScores(v, 11), () => []), [entry('ABC', 3)]);
+  });
+
   test(`${file}: E2 store keys use the prefix`, () => {
     const b = fakeBackend();
     const s = A.createStore(() => b, 'game.v1.');
