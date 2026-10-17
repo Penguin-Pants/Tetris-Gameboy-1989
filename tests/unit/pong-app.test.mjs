@@ -13,13 +13,27 @@ function frame(pressed = []) {
 }
 const idle = frame();
 
+test('PK1: Up and Down move the right paddle; the CPU moves the left', () => {
+  const app = A.createApp({ rng: seeded(1), store: null });
+  app.step(frame(['start']));
+  app.cpu = { move: () => 0 };
+  const { left, right } = app.match.paddles;
+  for (let i = 0; i < 5; i++) app.step(frame(['down']));
+  assert.equal(app.match.paddles.right, right + 5 * A.PLAYER_SPEED);
+  assert.equal(app.match.paddles.left, left);
+  app.cpu = { move: () => -2 };
+  app.step(idle);
+  assert.equal(app.match.paddles.left, left - 2);
+});
+
 // Ends the current match with the given final score.
-function endMatch(app, left, right) {
+// The player is on the right, the CPU on the left.
+function endMatch(app, player, cpu) {
   const m = app.match;
-  const leftWins = left > right;
-  m.score = { left: leftWins ? left - 1 : left, right: leftWins ? right : right - 1 };
+  const playerWins = player > cpu;
+  m.score = { left: playerWins ? cpu : cpu - 1, right: playerWins ? player - 1 : player };
   m.serveTimer = 0;
-  Object.assign(m.ball, leftWins ? { x: 370, y: 20, dir: 1, vy: 0 } : { x: 2, y: 20, dir: -1, vy: 0 });
+  Object.assign(m.ball, playerWins ? { x: 2, y: 20, dir: -1, vy: 0 } : { x: 370, y: 20, dir: 1, vy: 0 });
   m.paddles = { left: R.PADDLE_MAX_Y, right: R.PADDLE_MAX_Y };
   for (let i = 0; i < 10 && !m.over; i++) app.step(idle);
   assert.equal(m.over, true);
@@ -32,12 +46,12 @@ function skipFinal(app) {
 test('PH1/PH2: the score is the winning margin; a loss gives no entry', () => {
   const m = R.createMatch();
   m.over = true;
-  m.winner = 'left'; m.score = { left: 11, right: 0 };
+  m.winner = 'right'; m.score = { left: 0, right: 11 };
   assert.equal(A.marginOf(m), 11);
-  m.score = { left: 11, right: 10 };
+  m.score = { left: 10, right: 11 };
   assert.equal(A.marginOf(m), 1);
-  m.winner = 'right'; m.score = { left: 3, right: 11 };
-  assert.equal(A.marginOf(m), 0);
+  m.winner = 'left'; m.score = { left: 11, right: 3 };
+  assert.equal(A.marginOf(m), 0, 'a CPU win gives no score');
 
   const app = A.createApp({ rng: seeded(1), store: null });
   app.step(frame(['start']));

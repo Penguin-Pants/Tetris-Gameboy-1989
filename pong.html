@@ -304,7 +304,8 @@ PONG.CONST = (function () {
     // Serve about 1.7 s after a point (E 1.12), from H 262 (F serve).
     SERVE_FRAMES: 102,
     SERVE_X: 182,
-    // First serve of a match (assumption R6): toward the player, vy +1.
+    // First serve of a match (assumption R6): toward the player (right
+    // paddle, owner decision O3), vy +1.
     FIRST_VY: 1,
     WIN_SCORE: 11,
     // Net at H 256, 4 lines on and 4 off (E 1.5).
@@ -341,7 +342,7 @@ PONG.RULES = (function () {
   function createMatch() {
     var mid = (C.H - C.PADDLE_H) >> 1;
     return {
-      ball: { x: C.SERVE_X, y: (C.H - C.BALL) >> 1, dir: -1, vy: C.FIRST_VY },
+      ball: { x: C.SERVE_X, y: (C.H - C.BALL) >> 1, dir: 1, vy: C.FIRST_VY },
       paddles: { left: mid, right: mid },
       score: { left: 0, right: 0 },
       hits: 0,
@@ -641,8 +642,9 @@ PONG.APP = (function () {
 
   // CPU levels (PD1: only CPU behavior changes). Tuned in
   // tests/unit/pong-cpu.test.mjs, 300 seeded matches each, one random
-  // stream per side. CPU win rate against the reference bot: easy 12.3%,
-  // normal 53.0%, hard 86.0%. The new-player bot beats easy in 93.0%.
+  // stream per side, CPU on the left. CPU win rate against the reference
+  // bot: easy 12.3%, normal 46.7%, hard 87.0%. The new-player bot beats
+  // easy in 93.0%.
   var DIFFICULTY = {
     easy: { reaction: 16, speed: 3, error: 9, aim: 0 },
     normal: { reaction: 10, speed: 3, error: 8, aim: 0 },
@@ -662,9 +664,10 @@ PONG.APP = (function () {
   var BLINK_FRAMES = 32;
   var MAX_SCORE = C.WIN_SCORE;
 
-  // Winning margin on a player win, else 0 (PH1, PH2).
+  // Winning margin on a player win, else 0 (PH1, PH2). The player is on
+  // the right, the CPU on the left (owner decision O3).
   function marginOf(m) {
-    return m.winner === 'left' ? m.score.left - m.score.right : 0;
+    return m.winner === 'right' ? m.score.right - m.score.left : 0;
   }
 
   // Up and Down move the marker, no wrap (PF1).
@@ -709,7 +712,7 @@ PONG.APP = (function () {
       if (app.paused) return;
       var h = inp.held;
       var move = ((h.down ? 1 : 0) - (h.up ? 1 : 0)) * PLAYER_SPEED;
-      var ev = R.step(app.match, { left: move, right: app.cpu.move(playerView(app.match, 'right')) });
+      var ev = R.step(app.match, { left: app.cpu.move(playerView(app.match, 'left')), right: move });
       for (var i = 0; i < ev.length; i++) if (C.SOUND[ev[i].type]) app.sounds.push(ev[i].type);
       if (app.match.over) {
         app.screen = 'final';

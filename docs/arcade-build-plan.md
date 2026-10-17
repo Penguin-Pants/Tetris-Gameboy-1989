@@ -36,7 +36,7 @@ Assigned IDs, Space Invaders:
 Assigned IDs, Pong:
 
 - **PF1** Title: PONG, difficulty selector (EASY, NORMAL, HARD, Normal on each load), Top 10. Up and Down change difficulty. Enter starts. **PF2** Match to 11. **PF3** Final score stays 3 s, then name entry if the player won and qualifies, then title.
-- **PK1** Up and Down move the left paddle. **PK2** Name entry: Up and Down change the letter, Enter accepts.
+- **PK1** Up and Down move the right paddle (O3). **PK2** Name entry: Up and Down change the letter, Enter accepts.
 - **PD1** Difficulty changes CPU behavior only. **PD2** Headless simulation: CPU win rate rises Easy to Normal to Hard. Hard is beatable. Easy is beatable by a new player.
 - **PH1** Score is the winning margin (1 to 11) on a player win. **PH2** A loss never scores or reaches name entry. **PH3** One Top 10 for all difficulties. **PH4** Top 10 rows show rank, initials and margin, no difficulty.
 
@@ -142,6 +142,7 @@ Sources: Edwards, "Reconstructing Pong on an FPGA" (E, linked from `falstad.com/
 |---|---|
 | O1 | Plan path is `docs/arcade-build-plan.md`. Requirements copy is `docs/arcade-requirements.md`. |
 | O2 | Wave start heights follow the ROM table (2.3 Waves), including the repeat from rack 10. The I9 values are not used. The I9 numbers came from secondary notes and disagree with ROM table 1DA3. |
+| O3 | Pong: the player paddle is on the right and the CPU paddle on the left. This replaces P1 "Player paddle on the left". The first serve (R6) goes right, toward the player. |
 
 ### 3.2 Interpretations (non-blocking, cheap to change)
 | ID | Reading | Basis |
@@ -794,9 +795,9 @@ Readiness:
 | 10 (full acceptance) | ✅ Done. Owner checks open (look, sound, difficulty feel) |
 
 **Results**
-- `npm test`: 190 pass (109 Tetris). `npm run test:e2e`: all pass, Tetris specs included.
+- `npm test`: 193 pass (109 Tetris). `npm run test:e2e`: all pass, Tetris specs included.
 - No Tetris file changed. No network, `eval` or external resource in either game file.
-- Pong CPU win rate against `REF` (300 seeded matches, one random stream per side): Easy 12.3%, Normal 53.0%, Hard 86.0%. `NOVICE` beats Easy in 93.0%.
+- Pong CPU win rate against `REF` (300 seeded matches, one random stream per side): Easy 12.3%, Normal 46.7%, Hard 87.0%. `NOVICE` beats Easy in 93.0%. Measured with the CPU on the left (O3).
 
 **Changes from the plan**
 - Decision 12: the CPU has a fourth parameter, `aim` (chance to return the ball upward). Error alone could not lift the CPU win rate above about 70%.
@@ -804,6 +805,7 @@ Readiness:
 - Shared platform: `unlock()` resumes an audio context that a browser starts suspended.
 - Shared store: a corrupt saved value is removed before the fallback, so a later session can save again.
 - Footer: the M key shows next to the sound state.
+- Pong sides (O3): the player is on the right, the CPU on the left.
 
 **ROM facts confirmed during Phases 6 and 7 (Code.html)**
 - Each alien shot moves 4 px every 3 frames (80 px/s), gated by `shotSync` (0072, 04BC, 0683).

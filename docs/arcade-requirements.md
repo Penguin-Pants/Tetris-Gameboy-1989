@@ -86,7 +86,7 @@ Approximate check values from secondary notes (ROM governs): player shot about 2
 - When a side reaches 11, the final score stays on screen for 3 seconds *(default)*. If the player won and the margin qualifies, name entry follows. Then back to the title.
 
 ### 4.2 Controls
-- Up and Down arrows move the player paddle (left side).
+- Up and Down arrows move the player paddle (left side). **Amended 2026-10-17 (owner decision O3):** right side.
 - Enter starts and pauses. M toggles sound.
 - Name entry: Up and Down change the letter. Enter accepts.
 
@@ -94,7 +94,7 @@ Approximate check values from secondary notes (ROM governs): player shot about 2
 
 | ID | Requirement |
 |---|---|
-| P1 | 4:3 playfield. Player paddle on the left. CPU paddle on the right. Paddles move vertically only. Dashed center line. Large score digits at the top. |
+| P1 | 4:3 playfield. Player paddle on the left. CPU paddle on the right. Paddles move vertically only. Dashed center line. Large score digits at the top. **Amended 2026-10-17 (owner decision O3 in `docs/arcade-build-plan.md`):** the player paddle is on the right and the CPU paddle on the left. |
 | P2 | First side to 11 points wins. There is no win-by-two. A point is scored when the other side fails to return the ball. |
 | P3 | Each paddle has 8 segments. The segment hit sets the ball's return angle. The center segments return the ball straight back. The outer segments return it at steeper angles. The circuit gives 7 vertical velocities. |
 | P4 | The ball speeds up the longer a rally lasts. Horizontal speed rises after 4 hits and again after 12 hits. A miss resets the speed. |
