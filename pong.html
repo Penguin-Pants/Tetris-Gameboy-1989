@@ -529,7 +529,57 @@ PONG.VIEW = (function () {
     return out;
   }
 
-  return { text: text, textWidth: textWidth, centered: centered, renderMatch: renderMatch, score: score, net: net };
+  function pad(str, n) { while (str.length < n) str = ' ' + str; return str; }
+
+  // Top 10 rows (S9, PH4): rank, initials and margin. No difficulty.
+  // Empty rows show dashes (assumption R3).
+  function top10Rows(scores) {
+    var rows = [];
+    for (var i = 0; i < 10; i++) {
+      var e = scores[i];
+      rows.push(pad(String(i + 1), 2) + '. ' + (e ? e.name + ' ' + pad(String(e.score), 2) : '--- --'));
+    }
+    return rows;
+  }
+
+  // Title (PF1): PONG, the difficulty selector, the Top 10 and a blinking
+  // PRESS ENTER. s: { level, levels, scores, blinkOn }.
+  function renderTitle(s) {
+    var out = [];
+    centered(out, 'PONG', 10, 6);
+    var centers = [94, 188, 282];
+    for (var i = 0; i < s.levels.length; i++) {
+      var word = s.levels[i].toUpperCase();
+      var w = textWidth(word, 2), x = centers[i] - (w >> 1);
+      text(out, word, x, 64, 2);
+      if (s.levels[i] === s.level) out.push([x - 3, 82, w + 6, 2]);
+    }
+    centered(out, 'TOP 10', 94, 2);
+    var rows = top10Rows(s.scores);
+    var rowX = Math.round((C.W - textWidth(rows[0], 1)) / 2);
+    for (var r = 0; r < rows.length; r++) text(out, rows[r], rowX, 112 + r * 9, 1);
+    if (s.blinkOn) centered(out, 'PRESS ENTER', 210, 2);
+    return out;
+  }
+
+  // Name entry (S7): the winning margin, 3 letters and a bar under the
+  // current slot. ne: { letters, slot }.
+  function renderNameEntry(ne, margin) {
+    var out = [];
+    centered(out, 'YOU WIN BY ' + margin, 30, 2);
+    centered(out, 'ENTER YOUR INITIALS', 62, 2);
+    var px = 6, cell = 6 * px, x0 = Math.round((C.W - 3 * cell + px) / 2);
+    for (var i = 0; i < 3; i++) {
+      text(out, ne.letters[i], x0 + i * cell, 100, px);
+      if (i === ne.slot) out.push([x0 + i * cell, 148, 5 * px, 3]);
+    }
+    return out;
+  }
+
+  return {
+    text: text, textWidth: textWidth, centered: centered, renderMatch: renderMatch, score: score, net: net,
+    top10Rows: top10Rows, renderTitle: renderTitle, renderNameEntry: renderNameEntry
+  };
 })();
 /* ===== APP ===== */
 PONG.APP = (function () {
@@ -600,18 +650,43 @@ PONG.APP = (function () {
   // (assumption R7). The original used a knob.
   var PLAYER_SPEED = 4;
 
-  // ---- Screen state machine. opts: { rng, store }. store may be null.
-  // After each step, app.sounds lists the sound events of that frame.
+  // Final score hold (PF3, assumption): 3 seconds.
+  var FINAL_FRAMES = Math.round(3 * C.FPS);
+  // PRESS ENTER blinks on for 32 frames, off for 32.
+  var BLINK_FRAMES = 32;
+  var MAX_SCORE = C.WIN_SCORE;
+
+  // Winning margin on a player win, else 0 (PH1, PH2).
+  function marginOf(m) {
+    return m.winner === 'left' ? m.score.left - m.score.right : 0;
+  }
+
+  // Up and Down move the marker, no wrap (PF1).
+  function levelMove(level, p) {
+    var i = LEVELS.indexOf(level);
+    if (p.up && i > 0) i--;
+    else if (p.down && i < LEVELS.length - 1) i++;
+    return LEVELS[i];
+  }
+
+  // ---- Screen state machine: title, play, final, nameEntry.
+  // opts: { rng, store }. store may be null. After each step, app.sounds
+  // lists the sound events of that frame.
   function createApp(opts) {
     var store = opts.store;
     var V = PONG.VIEW;
+    function load(name, validate, fallback) { return store ? store.load(name, validate, fallback) : fallback(); }
     var app = {
       screen: 'title',
-      soundOn: store ? store.load('sound', ARCADE.validateSound, function () { return true; }) : true,
-      level: 'normal',
+      soundOn: load('sound', ARCADE.validateSound, function () { return true; }),
+      scores: load('scores', function (v) { return ARCADE.validateScores(v, MAX_SCORE); }, function () { return []; }),
+      level: 'normal',  // Normal on each load (assumption), not saved
       match: null,
       cpu: null,
       paused: false,
+      timer: 0,
+      margin: 0,
+      nameEntry: null,
       sounds: [],
       frame: 0
     };
@@ -630,21 +705,48 @@ PONG.APP = (function () {
       var move = ((h.down ? 1 : 0) - (h.up ? 1 : 0)) * PLAYER_SPEED;
       var ev = R.step(app.match, { left: move, right: app.cpu.move(playerView(app.match, 'right')) });
       for (var i = 0; i < ev.length; i++) if (C.SOUND[ev[i].type]) app.sounds.push(ev[i].type);
-      // Temporary flow until Phase 5: back to the title.
-      if (app.match.over) app.screen = 'title';
+      if (app.match.over) {
+        app.screen = 'final';
+        app.timer = FINAL_FRAMES;
+      }
+    }
+
+    function stepFinal() {
+      if (--app.timer > 0) return;
+      app.margin = marginOf(app.match);
+      if (ARCADE.qualifies(app.scores, app.margin)) {
+        app.nameEntry = ARCADE.createNameEntry('down', 'up');
+        app.screen = 'nameEntry';
+      } else {
+        app.screen = 'title';
+      }
+    }
+
+    function stepNameEntry(inp) {
+      var name = app.nameEntry.step(inp);
+      if (name === null) return;
+      app.scores = ARCADE.insertScore(app.scores, { name: name, score: app.margin }).list;
+      if (store) store.save('scores', app.scores);
+      app.screen = 'title';
     }
 
     app.step = function (inp) {
       app.sounds = [];
       app.frame++;
-      if (inp.pressed.sound) {
+      var p = inp.pressed;
+      if (p.sound) {
         app.soundOn = !app.soundOn;
         if (store) store.save('sound', app.soundOn);
       }
       if (app.screen === 'title') {
-        if (inp.pressed.start) startMatch();
+        if (p.start) startMatch();
+        else app.level = levelMove(app.level, p);
       } else if (app.screen === 'play') {
         stepPlay(inp);
+      } else if (app.screen === 'final') {
+        stepFinal();
+      } else if (app.screen === 'nameEntry') {
+        stepNameEntry(inp);
       }
     };
 
@@ -655,11 +757,19 @@ PONG.APP = (function () {
 
     app.render = function () {
       if (app.screen === 'play') return V.renderMatch(app.match, { label: app.paused ? 'PAUSE' : '' });
-      return V.centered([], 'PRESS ENTER', 114, 3);
+      if (app.screen === 'final') return V.renderMatch(app.match, {});
+      if (app.screen === 'nameEntry') return V.renderNameEntry(app.nameEntry, app.margin);
+      return V.renderTitle({
+        level: app.level, levels: LEVELS, scores: app.scores,
+        blinkOn: Math.floor(app.frame / BLINK_FRAMES) % 2 === 0
+      });
     };
 
     app.footerKeys = function () {
-      return [['\u2191 \u2193', 'MOVE'], ['ENTER', 'START/PAUSE']];
+      var ud = '\u2191 \u2193';
+      if (app.screen === 'title') return [[ud, 'LEVEL'], ['ENTER', 'START']];
+      if (app.screen === 'nameEntry') return [[ud, 'LETTER'], ['ENTER', 'NEXT']];
+      return [[ud, 'MOVE'], ['ENTER', 'PAUSE']];
     };
 
     return app;
@@ -667,7 +777,8 @@ PONG.APP = (function () {
 
   return {
     playerView: playerView, createTracker: createTracker, createCpu: createCpu,
-    DIFFICULTY: DIFFICULTY, LEVELS: LEVELS, PLAYER_SPEED: PLAYER_SPEED, createApp: createApp
+    DIFFICULTY: DIFFICULTY, LEVELS: LEVELS, PLAYER_SPEED: PLAYER_SPEED, FINAL_FRAMES: FINAL_FRAMES,
+    marginOf: marginOf, levelMove: levelMove, createApp: createApp
   };
 })();
 /* ==END LOGIC== */
