@@ -28,13 +28,20 @@
 | PH1 to PH4 | 4.5 | Pong high score |
 | E1 to E7 | 7 | Edge cases |
 
-Assigned IDs:
+Assigned IDs, Space Invaders:
+
 - **IF1** Attract loop: title, score advance table, Top 10, about 6 to 8 s each, blinking PRESS ENTER. **IF2** Enter starts a one-player game. **IF3** Game over banner 3 s, then name entry if qualified, then attract loop.
 - **IK1** Left and Right move the cannon. **IK2** Space fires, re-fire on hold follows the ROM. **IK3** Name entry: Left and Right change the letter, Enter accepts.
+
+Assigned IDs, Pong:
+
 - **PF1** Title: PONG, difficulty selector (EASY, NORMAL, HARD, Normal on each load), Top 10. Up and Down change difficulty. Enter starts. **PF2** Match to 11. **PF3** Final score stays 3 s, then name entry if the player won and qualifies, then title.
 - **PK1** Up and Down move the left paddle. **PK2** Name entry: Up and Down change the letter, Enter accepts.
 - **PD1** Difficulty changes CPU behavior only. **PD2** Headless simulation: CPU win rate rises Easy to Normal to Hard. Hard is beatable. Easy is beatable by a new player.
 - **PH1** Score is the winning margin (1 to 11) on a player win. **PH2** A loss never scores or reaches name entry. **PH3** One Top 10 for all difficulties. **PH4** Top 10 rows show rank, initials and margin, no difficulty.
+
+Assigned IDs, edge cases:
+
 - **E1** Storage failure (S10). **E2** Data is per game, per profile and file location, with prefixed keys per game. **E3** Score 0 and a Pong loss never qualify. **E4** Hidden tab or blur (S11). **E5** Enter pauses with a PAUSE label. **E6** Key rules (S4) and held keys clear on blur. **E7** Name-entry letters wrap Z to A and A to Z.
 
 **Acceptance criteria.** The source has no separate acceptance-criteria list. Each requirement row is its own criterion. Part 8 gives each one a verification method.
@@ -49,6 +56,9 @@ Assigned IDs:
 - Root: `gameboy-tetris.html` (2,068 lines), `README.md`, `AGENTS.md`, `CLAUDE.md`, `package.json`, `package-lock.json`, `playwright.config.mjs`, `.gitignore`, `docs/requirements.md` (Tetris), `docs/build-plan.md` (Tetris), `reference/screenshots/` (Tetris).
 - Tests: `tests/unit/*.test.mjs` (9 files, 109 tests, all pass with `npm test` on Node 22), `tests/e2e/*.spec.mjs` (9 files), helpers `tests/helpers/load-logic.mjs`, `tests/helpers/game-helpers.mjs`, `tests/e2e/helpers.mjs`.
 - No Makefile. Test entry points are `npm test` (`node --test "tests/unit/*.test.mjs"`) and `npm run test:e2e` (`playwright test`), `package.json:6-8`.
+
+Test tooling:
+
 - `playwright.config.mjs` matches `tests/e2e/*.spec.mjs` on Chromium. New spec files are picked up with no config change.
 - `node_modules/` is absent in a fresh clone. E2E needs `npm ci` first. Playwright is pinned at 1.56.1.
 - `tests/unit/repo.test.mjs` bans server, Docker and Railway files at the root. It covers S1 for the new files as well.
@@ -75,21 +85,25 @@ Source: `https://computerarcheology.com/Arcade/SpaceInvaders/Code.html` (C), `RA
 - **Coordinates.** ROM space is rotated: Xr runs left to right on the cabinet screen, Yr runs bottom to top. VRAM row = Xr − 0x20 (C intro, `ConvToScr` 1A47). The plan converts with screen x = Xr − 0x20 and screen y = 255 − Yr (top-down, 224×256). Phase 6 proves this with the bottom line (Yr 16), player (Yr 0x20) and saucer (Yr 0xD0) positions.
 - **Frame.** 60 Hz. Mid-screen interrupt (line 96, 008C) runs objects 1 to 4 and `CursorNextAlien` (0141). End-screen interrupt (line 224, 0010) runs the fleet sound timer, `DrawAlien` (0100), the object list and `TimeToSaucer`. Objects run only in the half that matches bit 7 of their coordinate (`CompYToBeam` 1A06).
 - **Objects** (`RunGameObjs` 0248): player 2010 (028E), player shot 2020 (03BB), rolling shot 2030 (0476), plunger shot 2040 (04B6), squiggly shot or saucer 2050 (0682).
+
 **Fleet and player**
 
 - **Fleet.** One live alien is drawn per end-screen interrupt. After index 55 the reference alien (bottom left) moves and the frame toggles (`MoveRefAlien` 01A1). Spacing 16 by 16 (017A). dX +2 or −2, +3 right with one alien left (18F1, 1597). Drop 8 per edge bump (mirror 200E). Fleet freezes while an alien or the player explodes (0105, 0141).
 - **March sound** (1775): 4 tones in rotation. Counts at 1A11 `32 2B 24 1C 16 11 0D 0A 08 07 06 05 04 03 02 01`, delays at 1A21 `34 2E 27 22 1C 18 15 13 10 0E 0D 0C 0B 09 07 05`. First count ≤ live aliens selects the delay. Each tone holds 4 ticks (1767).
 - **Player.** 1 px per frame, Xr 0x30 to 0xD9, Yr 0x20. Shot 4 px per run, starts at Xr+8, Yr 0x28. One shot at a time (162A). No auto-refire: `fireBounce` (202D) needs a release (1632-1651). This settles IK2. Explosion 12 changes × 5 ticks (02A7). Respawn timer 0x80 ticks, then alien fire waits 0x30 runs (02A1, 03B3).
+
 **Shots and saucer**
 
-- **Alien shots.** −4 Yr per move, −5 when fewer than 9 aliens (`SpeedShots` 08D8). The three shots take turns through `shotSync` (0476, 04BC, 0683). Plunger columns 1D00-1D0F `01 07 01 01 01 04 0B 01 06 03 01 01 0B 09 02 08`. Squiggly columns 1D06-1D14 `0B 01 06 03 01 01 0B 09 02 08 02 0B 04 07 0A`. Rolling aims at the column over player Xr+8 (061B). Shots fire from the lowest live alien in the column (062F). Reload by score MSB: ≤0x02 → 0x30, ≤0x10 → 0x10, ≤0x20 → 0x0B, ≤0x30 → 0x08, else 0x07 (170E, tables 1CB8 and 1AA1). Plunger is off with 1 alien left (04FC).
+- **Alien shots.** −4 Yr per move, −5 when fewer than 9 aliens (`SpeedShots` 08D8). The three shots take turns through `shotSync` (0476, 04BC, 0683). Plunger columns 1D00-1D0F `01 07 01 01 01 04 0B 01 06 03 01 01 0B 09 02 08`. Squiggly columns 1D06-1D14 `0B 01 06 03 01 01 0B 09 02 08 02 0B 04 07 0A`. Rolling aims at the column over player Xr+8 (061B). Shots fire from the lowest live alien in the column (062F). Reload by score MSB (the BCD hundreds byte, so 0x02 covers scores 200 to 299): table value ≥ MSB selects the entry (`JP NC` at 171E). ≤0x02 → 0x30, ≤0x10 → 0x10, ≤0x20 → 0x0B, ≤0x30 → 0x08, else 0x07 (170E, tables 1CB8 and 1AA1). So the last score of each bracket is 299, 1,099, 2,099 and 3,099. Plunger is off with 1 alien left (04FC).
 - **Saucer.** `tillSaucer` 0x0600 ticks, counts only while reference Yr < 0x78 (0913). Needs ≥ 8 aliens and no squiggly shot (06A1, 0691). Direction from `shotCountLSB` bit 0 (0462). Yr 0xD0. Score table 1D54 in BCD. Pointer moves at the end of every player-shot blow-up (`EndOfBlowup` 0447), wraps after 15 entries (044C). The saucer task runs only when `shotSync` = 2 (0683), so the score read at show-hit 0x18 (070C) comes about 24 frames after the hit. The hitting shot's 16-frame blow-up has ended by then, so the hitting shot is counted: hit with shot N (1-based) scores entry N mod 15. Shot 8 and shot 23 score 300. The 15 values equal I7. Reset per rack (09FD).
+
 **Shields, waves and end rules**
 
 - **Shields.** 4 shields, 22×16 px, Xr 64, 109, 154, 199, Yr 48-63 (01F8, 021E-023D). Erosion is pixel based: shot explosion sprites are drawn then AND-NOT erased (1452, 1491). Aliens overwrite shield pixels (15D3).
 - **Waves.** Rack 1 reference Yr 0x78. Racks 2 to 9 from 1DA3 `60 50 48 48 48 40 40 40` (byte-checked in the downloaded copy). Index = (rack count AND 7) + 1, so rack 10 repeats 0x60 (0A0C).
 - **Extra life** at score MSB ≥ 0x15 (1,500), once (0935). **Invasion:** a live alien with Yr < 0x28 ends the game (016B, 1971).
 - **Animation and score.** 2 frames. Rows 0-1 (bottom) 10 pts, rows 2-3 20 pts, row 4 30 pts (1DA0). Alien explosion 16 ticks (152A).
+
 **Known bugs and open reads**
 
 - **Known ROM bugs.** `CodeBug1` (C, near 1504): wrong row and column lookup when aliens are inside the shields. Not reproduced (non-goal). The 044C wrap is kept because I7 asks for the 15-entry behavior.
@@ -104,11 +118,13 @@ Sources: Edwards, "Reconstructing Pong on an FPGA" (E, linked from `falstad.com/
 - **Native coordinates used by this plan:** x = H − 80 (0 to 374), y = line − 16 (0 to 245). One x unit is one clock. One y unit is one line.
 - **Paddles.** 4 units wide. Left at x 48-51, right at x 304-307 (E 1.6). Height: 15 lines (E, F) or 16 (Ho). Plan uses 16, so 8 segments are 2 lines each (decision 9).
 - **Segments to vertical velocity** (E Fig. 11, F vbc), top to bottom: −3, −2, −1, 0, 0, +1, +2, +3 lines per frame (negative is up). That gives 7 values (P3).
+
 **Ball and serve**
 
 - **Ball.** 4 × 4 (E 1.8, Ho p37). Horizontal speed: 2, 3 or 4 units per frame for under 4 hits, 4 to 11 hits, 12 or more (Ho p50-51 and M agree; F hbc says 1/2/3 for its scaled demo). Plan uses 2/3/4 (decision 10). A miss resets the counter (F hbc, M).
 - **Walls.** Ball bounces at the top and bottom edges. The vertical value inverts (Ho p44, p46).
 - **Serve.** About 1.7 s after a point (E 1.12). Ball appears at x 182 (H 262). Direction stays, so it goes toward the side that missed. Vertical velocity and position stay as at the miss (Ho p71-72, F serve).
+
 **Display, sound and exclusions**
 
 - **Score digits.** Lines 32-63 (y 16-47). Left window x 48-111, right x 240-303. Two 32-unit cells each, digit 16 wide × 32 tall, 4-unit strokes. Leading zero blank (M, Ho p61). The original digits are dim. S2 makes them white.
@@ -150,11 +166,13 @@ Sources: Edwards, "Reconstructing Pong on an FPGA" (E, linked from `falstad.com/
 1. **Tetris isolation.** No change to any existing file: `gameboy-tetris.html`, `tests/**` files that exist today, `tests/helpers/*`, `package.json`, `package-lock.json`, `playwright.config.mjs`, `README.md`, `docs/requirements.md`, `docs/build-plan.md`. All new work is new files. This overrides `AGENTS.md` Edits rule 6 (migrate all call sites): Tetris keeps its own loader and helpers. Every phase checks `git diff --name-only <base> -- <Tetris paths>` is empty and the 109 Tetris unit tests still pass.
 2. **Two standalone files, shared text copied.** S1 forbids shared external files. Both files carry an identical `ARCADE` section (ticker, input, store, scores, name entry, sound flag) inside the logic block and an identical `ARCADE PLATFORM` section (screen fit, footer, audio core, blur and visibility). One shared test suite runs against both files, so each copy is tested for behavior.
 3. **Pure logic block, same markers as Tetris.** Sections `ARCADE`, `CONST`, `RULES`, `DATA`, `VIEW`, `APP` sit between the logic markers with no DOM, storage or audio calls. Namespaces: `SI` for Space Invaders, `PONG` for Pong. New loader `tests/helpers/load-arcade.mjs` exports `loadGame(fileName, ns)` and returns `{ ARCADE, <ns> }`.
+
 **Space Invaders engine**
 
 4. **Space Invaders runs on a 1-bit bitmap like the ROM.** The rules engine owns a 224×256 `Uint8Array` playfield. Collision, shield erosion and alien overwrite are pixel tests on that bitmap, as in the ROM (2.3 Shields). This is the only way to get exact erosion and hit rules. HUD text is drawn by `VIEW` on a copy.
 5. **Space Invaders timing is per interrupt.** One `step()` is one 60 Hz frame: a mid-screen half, then an end-screen half. Each object runs in the half that matches its coordinate bit 7, as in the ROM. All counters are in ticks.
 6. **Space Invaders values stay in ROM units.** Constants use Xr and Yr and the ROM hex values with the ROM address in a comment. One conversion function maps to screen pixels.
+
 **Pong engine**
 
 7. **Pong runs in native circuit units.** Rules use x 0 to 374 and y 0 to 245 at 60.05 Hz.
@@ -162,16 +180,18 @@ Sources: Edwards, "Reconstructing Pong on an FPGA" (E, linked from `falstad.com/
 9. **Pong paddle height 16.** 8 segments of 2 lines. Sources disagree (15 or 16). 16 gives equal segments (P3).
 10. **Pong horizontal speed 2, 3, 4.** Holden and the MAME netlist agree. The Falstad page is a scaled demo.
 11. **Pong top strip.** Constant `PADDLE_MIN_Y = 16` lines. Unverified assumption: no source states the count. Verify by eye against a Pong video or MAME run. The bottom edge is reachable (P5 names only the top).
+
 **Pong CPU**
 
 12. **CPU model (PD1, PD2).** The CPU paddle follows the same paddle rules as the player. Three parameters per difficulty: reaction delay (frames before it reacts to a new ball direction), maximum speed (lines per frame) and aim error (random offset from the paddle center, drawn once per return). Random source is injected.
-13. **Reference opponents for PD2.** Both are bots in `PONG.APP` used only by the simulation test.
+13. **Reference opponents for PD2.** Both bots and the match runner live in `tests/unit/pong-cpu.test.mjs`. `pong.html` ships only the CPU and the rules. Bots and the CPU use one controller shape: `move(view) → lines per frame`, where `view` holds what a player sees.
     - `REF` (fixed reference): reaction 8 frames, speed 4 (same as the player), aim error ±4 lines.
     - `NOVICE` (new player): reaction 14 frames, speed 3, aim error ±7 lines.
     - Targets over 300 seeded matches each: CPU win rate vs `REF` is Easy ≤ 35%, Normal 40% to 65%, Hard 70% to 90%, strictly rising. `NOVICE` beats Easy in ≥ 50% of matches. Hard ≤ 90% vs `REF` is "beatable".
+
 **Storage, art, audio and tests**
 
-14. **Storage keys.** `spaceinvaders.v1.scores`, `spaceinvaders.v1.sound`, `pong.v1.scores`, `pong.v1.sound`. Tetris uses `gbtetris.v1.` (`gameboy-tetris.html:163`). No collision (E2). Any backend error after the probe sets the backend to null for the session, so later loads read the in-memory values. This fixes a gap in the Tetris adapter: there a failed `setItem` leaves the backend live, and the next load reads the old stored value.
+14. **Storage keys.** `spaceinvaders.v1.scores`, `spaceinvaders.v1.sound`, `pong.v1.scores`, `pong.v1.sound`. Tetris uses `gbtetris.v1.` (`gameboy-tetris.html:163`). No collision (E2). Any backend error after the probe sets the backend to null for the session, so later loads read the in-memory values. This fixes a gap in the Tetris adapter: there a failed `setItem` leaves the backend live, and the next load reads the old stored value. Corrupt data counts as a storage failure (S10 says "unavailable or corrupt"): a JSON parse error or any invalid entry makes the load return the default, sets `ok` to false and drops the backend for the session. Validators therefore reject the whole value instead of filtering entries.
 15. **Art.** Space Invaders sprites and font are redrawn by eye at the ROM sizes. ROM bitmap bytes are not copied. Shapes need not be pixel-identical (source part 5). Sizes are fixed because collision depends on them.
 16. **Audio.** WebAudio. Tones are square oscillators. Explosions and shots use a filtered noise buffer. Mute sets master gain to 0. Pause and hidden tab suspend the context.
 17. **Tests.** Unit tests with `node:test`, no new packages. E2E with the existing Playwright. No dependency changes.
@@ -212,11 +232,12 @@ S1, S4, S6, S7, S8, S10, S12 (footer shell), S13, E1, E2, E3, E6, E7
 
 **Changes**
 - Create `space-invaders.html` and `pong.html` with the section layout in part 5. Canvas `#screen`, footer `#footer` with key legend, sound state and `#notice` ("Scores not saved").
-- `ARCADE` section (identical in both files):
+- `ARCADE` section, core (identical in both files):
   - `createTicker(fps, cap)` (copy of Tetris).
   - `createInput(keyMap)`: fixed map of `KeyboardEvent.code` to actions. Ignores `repeat` and Ctrl/Alt/Meta. `clear()`.
   - `createStore(getBackend, prefix)`: copy of Tetris with a prefix argument. Any error on `getItem` or `setItem` drops the backend and switches to memory (decision 14).
-  - Scores: `validateScores`, `qualifies`, `rankOf`, `insertScore`. Entry `{ name: 3 letters A-Z, score: int }`. Max score is a parameter (9,999 or 11).
+- `ARCADE` section, scores and settings (identical in both files):
+  - Scores: `validateScores`, `qualifies`, `rankOf`, `insertScore`. Entry `{ name: 3 letters A-Z, score: int }`. Max score is a parameter (9,999 or 11). `validateScores` returns null when any entry is invalid (decision 14).
   - `createNameEntry({ prevKey, nextKey })`: 3 slots, each starts at A, wrap both ways, Enter accepts a slot, returns the name after slot 3.
   - Sound flag load and save with validator (boolean, default true, R1).
 - `ARCADE PLATFORM` section (identical in both files): fit-to-window (stage = window minus footer, keep aspect, black margins, no scrollbars), footer renderer, audio core (unlock on first keydown, master gain, `setMuted`, `suspend`, `resume`, `tone(freq, ms)`, `noise(ms, filter)`), blur and visibility binding.
@@ -227,12 +248,17 @@ S1, S4, S6, S7, S8, S10, S12 (footer shell), S13, E1, E2, E3, E6, E7
 - CSS: `html, body` black, `overflow: hidden`, canvas `image-rendering: pixelated`.
 
 **Tests**
-- Unit: `tests/unit/arcade-common.test.mjs` runs every `ARCADE` test below once per file (`pong.html` and `space-invaders.html`).
+Shared suite (`tests/unit/arcade-common.test.mjs` runs each test once per file, `pong.html` and `space-invaders.html`):
+
 - Unit: input ignores repeat and modifier combos, tracks edges, `clear()` empties held keys (S4, E6).
 - Unit: store with a throwing backend, a backend that throws on `setItem` and corrupt JSON. Game values fall back, `ok` is false (S10, E1). For each error path, a save then a load in the same session returns the saved value.
 - Unit: qualification matrix: 0 never qualifies, fewer than 10 entries qualifies, must beat the 10th, ties rank below older (S8, E3).
 - Unit: name entry wraps Z to A and A to Z, starts at A, saves after slot 3 (S7, E7).
+
+Validation and load:
+
 - Unit: validators reject names that are not 3 letters A to Z, non-integer scores and scores above the max.
+- Unit: well-formed JSON with one invalid score entry or a non-boolean sound value: `store.load` returns the default and `ok` becomes false (S10, decision 14).
 - E2E: each file loads with no console output and zero network requests (S1). Body has no scrollbars at 800×600 and 1920×1080.
 
 **Acceptance criteria**
@@ -266,12 +292,17 @@ In `pong.html`:
 - Paddle position clamps to `PADDLE_MIN_Y` at the top and the field bottom.
 
 **Tests**
+Paddle and ball:
+
 - Each of the 8 segments gives the table velocity. Center segments give 0 (P3).
 - Speed is 2 for hits 0-3, 3 for hits 4-11, 4 from hit 12. A miss resets to 2 (P4).
 - Paddle top never goes above `PADDLE_MIN_Y` (P5).
+- Wall bounce inverts vertical velocity, ball never leaves y 0 to 245.
+
+Serve and match:
+
 - After a left miss the serve moves left, and the reverse (P6). Serve waits the delay.
 - Match ends at 11-x, also at 11-10 (P2).
-- Wall bounce inverts vertical velocity, ball never leaves y 0 to 245.
 - Fuzz: 1,000 seeded random matches finish with valid state.
 
 **Acceptance criteria**
@@ -291,8 +322,8 @@ The CPU has three tuned levels. A headless test proves PD2.
 PD1, PD2
 
 **Changes**
-In `pong.html` `APP`: `createCpu(level, rng)` returning a move per frame from the match state. `DIFFICULTY` table with reaction delay, max speed and aim error per level. Bots `REF` and `NOVICE` per decision 13.
-New `tests/unit/pong-cpu.test.mjs`.
+- In `pong.html` `APP`: `createCpu(level, rng)` with the controller shape from decision 13. `DIFFICULTY` table with reaction delay, max speed and aim error per level. `playerView(match, side)` builds the view a player sees.
+- New `tests/unit/pong-cpu.test.mjs`: bots `REF` and `NOVICE`, a match runner that drives `PONG.RULES.step` with two controllers, and the simulation tests. No test code goes into `pong.html`.
 
 **Implementation notes**
 - The CPU sees only state a player sees (ball position and direction, own paddle). No reading of the future serve.
@@ -332,9 +363,14 @@ P1 (look), P7, S2, S3, S4, S5, S11, S12, PK1, E4, E5, E6
 - The ball is hidden during the serve delay.
 
 **Tests**
+Layout and look:
+
 - Unit: rectangle list for a fixed state (positions, net dashes 4 on 4 off, digits for 0, 7, 11, leading zero blank).
 - E2E: canvas keeps 4:3 at 800×600, 1600×900, 900×1200. Margins are black. No scrollbars (S3).
 - E2E: every sampled canvas pixel is pure black or pure white (S2).
+
+Input and audio:
+
 - E2E: Enter pauses and shows PAUSE. Blur and hidden tab pause and suspend audio. Held keys clear (S11, E4, E5, E6).
 - E2E with a stubbed AudioContext: no context before the first key, tones on paddle hit, wall hit and point, none while muted, M state survives reload (S5, P7).
 - E2E: an OS key-repeat event does not change paddle travel (S4).
@@ -366,11 +402,20 @@ PF1, PF2, PF3, PK2, PH1, PH2, PH3, PH4, S6, S7, S8, S9, S10, S12 (notice), S14, 
 - Text uses a block font built from rectangles at the score-digit style.
 
 **Tests**
+Unit:
+
 - Unit: margin math for 11-0 (11), 11-10 (1). Loss gives no entry (PH1, PH2).
 - Unit: difficulty selector Up and Down, no wrap, default Normal.
+
+Flow:
+
 - E2E: scripted win (CPU stubbed to miss) goes to name entry, Up and Down change letters, Enter 3 times saves, title shows the row, survives reload (PK2, S6, S9).
 - E2E: scripted loss returns to title with no name entry (PH2).
+- E2E: with a full Top 10 whose 10th margin is 5, a 3-point win returns to the title with no name entry and the list unchanged (S8, PF3).
 - E2E: wins on Easy and Hard land in one list (PH3). Rows show no difficulty (PH4).
+
+Storage:
+
 - E2E: blocked localStorage shows "Scores not saved" and the game still plays (S10).
 - E2E: Tetris key `gbtetris.v1.scores` is untouched after a Pong save (E2).
 
@@ -402,16 +447,21 @@ In `space-invaders.html`:
 - Fix `CodeBug1`: find the row and column from the hit point directly.
 
 **Tests**
+Fleet and scoring:
+
 - 55 aliens in 5 × 11 at the rack 1 start. Points 30, 20, 20, 10, 10 by row (I1, I2).
 - Fleet step period equals live aliens (frames per full step) for 55, 30, 1. dX +3 right with 1 alien. Drop 8 at each edge (I4).
 - March tempo: delay from the 1A11 and 1A21 tables for each count bracket (I4, I12 timing).
-- Player shot 4 px per run. Second fire is refused while a shot is live. Holding fire does not re-fire after a hit (I5, IK2).
 - Wave start Yr for racks 1 to 10 equals `78 60 50 48 48 48 40 40 40 60` (I9 per O2).
+- Score caps at 9,999.
+
+Player, shields and end rules:
+
+- Player shot 4 px per run. Second fire is refused while a shot is live. Holding fire does not re-fire after a hit (I5, IK2).
 - Extra life once at 1,500. Lives start at 3 (I3).
 - An alien reaching Yr < 0x28 ends the game. Losing the last life ends the game (I10).
 - Shield pixel count drops after a player shot hits it. Aliens erase shield pixels when they reach shield rows (I8).
 - Coordinate conversion puts the bottom line at screen y 239 and the player at y 223 (2.3 Coordinates).
-- Score caps at 9,999.
 
 **Acceptance criteria**
 - All tests pass. Every value not in the requirements has a ROM address comment (I13).
@@ -436,13 +486,18 @@ In `RULES`: rolling, plunger and squiggly shots with `shotSync` turns, column ta
 - First confirm the moves per frame of each shot and the saucer in C (handlers 0476, 04B6, 0682 and `shotSync`). Record the result with addresses. Check against 80 px/s for alien shots.
 
 **Tests**
+Alien shots:
+
 - Plunger and squiggly columns follow the tables and wrap (I6).
 - Rolling shot picks the column over the player (I6).
-- Reload rate for scores 0, 300, 1,100, 2,100, 3,100 equals 0x30, 0x10, 0x0B, 0x08, 0x07 (I6).
+- Reload rate at each bracket edge: 0 and 299 → 0x30, 300 and 1,099 → 0x10, 1,100 and 2,099 → 0x0B, 2,100 and 3,099 → 0x08, 3,100 → 0x07 (I6, 2.3 reload).
 - Alien shot speed −4, then −5 below 9 aliens. Measured speed is about 80 px/s.
+- Shot hits on player start the explosion and remove a life.
+
+Saucer:
+
 - Saucer appears after 0x600 ticks only with ≥ 8 aliens and no squiggly shot. Direction follows shot count parity (I7).
 - Saucer hit with shot N (1-based, the hitting shot counted) scores table entry N mod 15 of `100 50 50 100 150 100 100 50 300 100 100 100 50 150 100`. Check N = 1 (50), 8 (300), 15 (100), 23 (300) (I7, 2.3 Saucer).
-- Shot hits on player start the explosion and remove a life.
 
 **Acceptance criteria**
 - All tests pass. A seeded replay of 3 scripted games gives fixed scores and bitmap hashes.
@@ -468,9 +523,14 @@ I11, I12, S2, S3, S4, S5, S11, S12, IK1, IK2, E4, E5, E6
 - Footer: `← → MOVE  SPACE FIRE  ENTER START/PAUSE  M SOUND: ON`.
 
 **Tests**
+Layout and look:
+
 - Unit: HUD framebuffer for score 0 and 9,999, HI-SCORE 0000 with an empty list and the first entry with a list (I11).
 - E2E: portrait aspect at the Pong viewport matrix, black margins, no scrollbars (S3).
 - E2E: every sampled pixel is pure black or white (S2).
+
+Input and audio:
+
 - E2E: pause, blur and hidden tab pause the game and suspend audio. Held keys clear (S11, E4, E5, E6).
 - E2E with stubbed AudioContext: each of the 6 effects fires on its event, none when muted, sound state survives reload (S5, I12).
 - E2E: Space held does not re-fire. Left and Right move the cannon (IK1, IK2).
@@ -497,9 +557,15 @@ IF1, IF2, IF3, IK3, S6, S7, S8, S9, S10, S14, E1, E2, E3
 - Storage `spaceinvaders.v1.scores`, `spaceinvaders.v1.sound`. Footer notice when `store.ok` is false.
 
 **Tests**
+Flow:
+
 - Unit: attract loop cycles 3 screens on the timer. Enter starts from any of them (IF1, IF2).
 - E2E: scripted game over (rules hook to end the game) shows the banner for 3 s, then name entry with Left and Right letter changes, saves, attract Top 10 shows it, HUD HI-SCORE shows it after reload (IF3, IK3, S6, S9, I11).
 - E2E: score 0 skips name entry (E3).
+- E2E: with a full Top 10 whose 10th score is 500, a game over at 300 returns to the attract loop with no name entry and the list unchanged (S8, IF3).
+
+Storage:
+
 - E2E: blocked localStorage shows the notice and the game still plays (S10).
 - E2E: Pong and Tetris keys are untouched by a Space Invaders save (E2).
 
@@ -639,6 +705,9 @@ Phases 5 and 9.
 - I9 disagreed with ROM table 1DA3. Raised to the owner. Resolved as O2.
 - IK2 ("re-fire follows the ROM") had no answer in the source. Resolved from ROM 1632-1651: no auto-refire.
 - PD2 needed an objective target. Defined bots, sample size and bands (decision 13).
+
+**Pass 1: coverage, continued**
+
 - S5 has no default sound state. Recorded R1.
 - E2 needs isolation from Tetris as well as between the two games. Added the Tetris key to the E2E checks.
 - S12 footer appears in every play phase. Mapped to Phases 1, 4, 5, 8 and 9.
@@ -648,29 +717,47 @@ Phases 5 and 9.
 - Rejected a shared helper refactor of `tests/helpers/load-logic.mjs`: it is a Tetris file. New loader instead. Recorded as an exception to `AGENTS.md` Edits rule 6.
 - Pong sources conflict on paddle height and horizontal speed. Decided with reasons (decisions 9, 10). Top strip count has no source. Named constant and owner check (decision 11).
 - Space Invaders shot and saucer per-frame rates are not confirmed. Phase 7 starts with that read, with a cross-check value. Not a blocker.
+
+**Pass 2: size and risk**
+
 - Space Invaders rules were one large phase. Split into fleet and player (6) and shots and saucer (7).
 - Temporary flows in Phases 4 and 8 let the screen be checked before the menus. Each has a removal owner.
 - Pixel collision needs a bitmap in the rules. Made it explicit (decision 4) so the view does not own collision.
 - R6 text was corrected to one rule (vertical velocity +1 on the first serve).
 
 **PR review round 1 (CodeRabbit and Codex on the first commit)**
+
 - I9 amended in `docs/arcade-requirements.md` to match O2.
 - Saucer score test was one shot early. The hitting shot is counted (2.3 Saucer). Test fixed.
 - Tetris `createStore` keeps a failed backend live. The arcade copy drops it on any error. Save-then-load tests added.
 - Byte-identity test replaced with one behavior suite run against both files.
 
 **PR review round 1, wording and rejected items**
+
 - R4 now names the Midway ROM set and the skipped TAITO line.
 - Evidence and decisions are grouped (AGENTS.md Output rule 05).
 - Rejected: wall and point tone at 980 Hz. The source bit gives 246 Hz (2.4 Sounds).
+
+**PR review round 2 (Codex on 85912ae)**
+
+- Reload tests now cover both sides of each bracket edge (299/300, 1,099/1,100, 2,099/2,100, 3,099/3,100). The edges are 299 and so on, not 200, because the ROM compares the BCD hundreds byte.
+- Added a non-qualifying positive score test to both game flows.
+- Corrupt but well-formed saved data now counts as a storage failure (decision 14).
+- `REF`, `NOVICE` and the match runner moved to the test file (decision 13).
+- Remaining long lists grouped.
 
 ---
 
 ## 11. Definition of done check
 
+Coverage:
+
 1. Every in-scope requirement maps to a phase (part 8).
 2. Every requirement has a verification method (part 8).
 3. Phase order and dependencies are explicit (part 6). Pong (2-5) and Space Invaders (6-9) depend only on Phase 1 and can run in parallel.
+
+Readiness:
+
 4. Technical choices rest on part 2 evidence. Open reads are named with ROM addresses or source pages.
 5. No engineering ambiguity blocks coding. Source conflicts are decided (decisions 9 to 11).
 6. Product decisions are resolved (O1, O2). Non-blocking readings are R1 to R10.
