@@ -310,6 +310,24 @@ SI.CONST = (function () {
     FLEET_COUNTS: [0x32, 0x2B, 0x24, 0x1C, 0x16, 0x11, 0x0D, 0x0A, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01],
     FLEET_DELAYS: [0x34, 0x2E, 0x27, 0x22, 0x1C, 0x18, 0x15, 0x13, 0x10, 0x0E, 0x0D, 0x0C, 0x0B, 0x09, 0x07, 0x05],
     FLEET_HOLD: 4,              // fleetSndHold (1767)
+    // Column-firing table (ColFireTable 1D00): plunger uses 0x00-0x0F,
+    // squiggly uses 0x06-0x14 (04DC, 0529).
+    COL_TABLE: [0x01, 0x07, 0x01, 0x01, 0x01, 0x04, 0x0B, 0x01, 0x06, 0x03, 0x01, 0x01, 0x0B, 0x09, 0x02, 0x08,
+      0x02, 0x0B, 0x04, 0x07, 0x0A],
+    PLUNGER_WRAP: 0x10,
+    SQUIGGLY_START: 0x06,
+    SQUIGGLY_WRAP: 0x15,
+    SHOT_END_YR: 0x15,          // An alien shot below this Yr ends (05F6)
+    PLAYER_HIT_LO: 0x1E,        // A hit in Yr 0x1E-0x26 strikes the player (0603, 0608)
+    PLAYER_HIT_HI: 0x27,
+    SHOT_BLOW_COUNT: 4,         // aShotBlowCnt (mirror 203A)
+    // Saucer (SaucerScrTab 1D54, first 15 entries; the 044C wrap is kept for I7).
+    SAUCER_SCORES: [100, 50, 50, 100, 150, 100, 100, 50, 300, 100, 100, 100, 50, 150, 100],
+    SAUCER_TIME: 0x0600,        // tillSaucer (0921)
+    SAUCER_YR: 0xD0,            // Mirror 2089
+    SAUCER_XR: 0x29,            // Mirror 208A
+    SAUCER_MIN_ALIENS: 8,       // 06A1
+    SAUCER_HIT_TIME: 0x20,      // Mirror 2086
     PROMPT_TICKS: 0xB0,         // PromptPlayer 08A4
     RACK_END_TICKS: 0x30,       // 0A42
     LETTER_TICKS: 7             // PrintMessageDel 0A99
@@ -813,6 +831,13 @@ SI.RULES = (function () {
     mirrorPlayer(g);
     mirrorShot(g);
     g.fireBounce = 0;
+    g.rol = alienShot('rolling');
+    g.plu = alienShot('plunger');
+    g.squ = alienShot('squiggly');
+    mirrorSaucer(g);
+    g.sauScoreIdx = 0;          // 208D -> 1D54
+    g.shotCount = 0;            // 208F
+    g.tillSaucer = C.SAUCER_TIME;
     g.expAlienYr = 0;
     g.expAlienXr = 0;
     g.playerOK = 1;
@@ -828,6 +853,28 @@ SI.RULES = (function () {
     g.fleetCount = 0x40;        // 2096
     g.fleetReload = 0;          // 2097
     g.fleetTone = 0;            // 2098 bit 0 (tone 1)
+  }
+
+  // Alien shot structures (mirror 1B35, 1B45, 1B55).
+  function alienShot(kind) {
+    var frames = kind === 'rolling' ? D.ROLLING : kind === 'plunger' ? D.PLUNGER : D.SQUIGGLY;
+    return {
+      kind: kind, status: 0, steps: 0, track: kind === 'rolling' ? 0 : 1,
+      // Rolling: 0 makes the shot skip its first try (047D). Others: table index.
+      cfir: kind === 'squiggly' ? C.SQUIGGLY_START : 0,
+      blowCnt: C.SHOT_BLOW_COUNT, frames: frames, frame: 0, img: frames[0], yr: 0, xr: 0
+    };
+  }
+
+  // Saucer structure (mirror 1B83, 10 bytes).
+  function mirrorSaucer(g) {
+    g.saucerStart = 0;
+    g.saucerActive = 0;
+    g.saucerHit = 0;
+    g.saucerHitTime = C.SAUCER_HIT_TIME;
+    g.saucerImg = D.SAUCER;
+    g.saucerXr = C.SAUCER_XR;
+    g.saucerDX = 2;
   }
 
   // InitRack 00B1: copy the stored reference position and direction.
@@ -957,11 +1004,160 @@ SI.RULES = (function () {
     endOfBlowup(g);
   }
 
-  // Hook for shot bookkeeping (saucer score pointer, 0447). Phase 7 fills it.
-  function shotEnded(g) { /* see Phase 7 */ }
+  // EndOfBlowup 0447: every removed player shot moves the saucer score
+  // pointer (15 entries, 044C) and the shot count. The count's low bit sets
+  // the next saucer's side (0462).
+  function shotEnded(g) {
+    g.sauScoreIdx = g.sauScoreIdx + 1 >= C.SAUCER_SCORES.length ? 0 : g.sauScoreIdx + 1;
+    g.shotCount = (g.shotCount + 1) & 0xFF;
+    if (g.saucerActive) return;
+    if (g.shotCount & 1) { g.saucerXr = 0x29; g.saucerDX = 2; } else { g.saucerXr = 0xE0; g.saucerDX = -2; }
+  }
 
-  // Game objects 2 to 4: alien shots and saucer (Phase 7).
-  function alienTask() { /* stubbed off in Phase 6 */ }
+  // ---- Game objects 2 to 4: alien shots and the saucer.
+  // FindInColumn 062F: lowest live alien in a 1-based column, or -1.
+  function findInColumn(g, col) {
+    for (var row = 0; row < C.ROWS; row++) {
+      var idx = row * C.COLS + col - 1;
+      if (g.aliens[idx]) return idx;
+    }
+    return -1;
+  }
+
+  // HandleAlienShot 0563. o1 and o2 are the step counts of the other shots.
+  function handleAlienShot(g, s, o1, o2) {
+    if (!(s.status & 0x80)) {
+      if (!g.enableAlienFire) return;
+      s.steps = 0;
+      // Reload (057C): too soon while the rate is not below another shot's steps.
+      if (o1 && g.reloadRate >= o1) return;
+      if (o2 && g.reloadRate >= o2) return;
+      var col;
+      if (s.track === 0) {                                  // 061B: over the player
+        col = findColumn(g, (g.playerXr + 8) & 0xFF);
+        if (col >= 12) col = 11;
+      } else {
+        col = C.COL_TABLE[s.cfir];
+        s.cfir++;
+      }
+      var idx = findInColumn(g, col);
+      if (idx < 0) return;
+      var p = alienCoords(g, idx);
+      s.xr = (p.xr + 7) & 0xFF;                             // 05AC
+      s.yr = (p.yr - 10) & 0xFF;                            // 05B0
+      s.status |= 0x80;
+      s.steps++;
+      return;
+    }
+    if (!compYToBeam(g, s.xr)) return;
+    if (s.status & 1) {                                     // ShotBlowingUp 0644
+      s.blowCnt--;
+      if (s.blowCnt === 3) {
+        eraseShifted(g, s.img, s.xr, s.yr);
+        s.img = D.ALIEN_SHOT_EXPLOSION;
+        s.xr = (s.xr - 2) & 0xFF;
+        s.yr = (s.yr - 2) & 0xFF;
+        drawCollide(g, s.img, s.xr, s.yr);
+      } else if (s.blowCnt === 0) {
+        eraseShifted(g, s.img, s.xr, s.yr);
+      }
+      return;
+    }
+    s.steps++;
+    eraseShifted(g, s.img, s.xr, s.yr);
+    s.frame = (s.frame + 1) & 3;
+    s.img = s.frames[s.frame];
+    s.yr = (s.yr + g.alienShotDelta) & 0xFF;
+    var hit = drawCollide(g, s.img, s.xr, s.yr);
+    if (s.yr < C.SHOT_END_YR) { s.status |= 1; return; }
+    if (!hit) return;
+    if (s.yr >= C.PLAYER_HIT_LO && s.yr < C.PLAYER_HIT_HI) g.playerAlive = 0;   // 060E
+    s.status |= 1;
+  }
+
+  // GameObj2 0476: rolling shot. Its timer is copied to shotSync, which lets
+  // only one of the three shots run per tick.
+  function rollingTask(g) {
+    g.obj[2].extra = 2;
+    if (g.rol.cfir === 0) { g.rol.cfir = 0xFFFF; return; }
+    handleAlienShot(g, g.rol, g.plu.steps, g.squ.steps);
+    if (g.rol.blowCnt !== 0) return;
+    g.rol = alienShot('rolling');
+    g.obj[2] = { timer: 0, extra: 2 };
+  }
+
+  // GameObj3 04B6: plunger shot. Off once it ends with one alien left.
+  function plungerTask(g) {
+    if (g.skipPlunger || g.shotSync !== 1) return;
+    handleAlienShot(g, g.plu, g.rol.steps, g.squ.steps);
+    if (g.plu.cfir >= C.PLUNGER_WRAP) g.plu.cfir = 0;
+    if (g.plu.blowCnt !== 0) return;
+    var keep = g.plu.cfir;
+    g.plu = alienShot('plunger');
+    g.obj[3] = { timer: 0, extra: 0 };
+    if (g.numAliens === 1) g.skipPlunger = 1;
+    g.plu.cfir = keep;
+  }
+
+  // 050F: squiggly shot.
+  function squigglyTask(g) {
+    handleAlienShot(g, g.squ, g.plu.steps, g.rol.steps);
+    if (g.squ.cfir >= C.SQUIGGLY_WRAP) g.squ.cfir = C.SQUIGGLY_START;
+    if (g.squ.blowCnt !== 0) return;
+    var keep = g.squ.cfir;
+    g.squ = alienShot('squiggly');
+    g.obj[4] = { timer: 0, extra: 0 };
+    g.squ.cfir = keep;
+  }
+
+  function drawSaucer(g) { drawSimple(g, g.saucerImg, g.saucerXr, C.SAUCER_YR); }
+
+  // 06F9: remove the saucer.
+  function removeSaucer(g) {
+    clearSmall(g, 24, g.saucerXr, C.SAUCER_YR);
+    mirrorSaucer(g);
+    soundOff(g, ~SND.UFO);
+  }
+
+  // GameObj4 0682: the saucer, or the squiggly shot when no saucer is due.
+  function saucerTask(g) {
+    if (g.shotSync !== 2) return;
+    if (!g.saucerStart || g.squ.steps !== 0) { squigglyTask(g); return; }
+    if (!g.saucerActive) {
+      if (g.numAliens < C.SAUCER_MIN_ALIENS) { squigglyTask(g); return; }
+      g.saucerActive = 1;
+      drawSaucer(g);
+    }
+    if (!compYToBeam(g, g.saucerXr)) return;
+    if (g.saucerHit) { saucerHitSequence(g); return; }
+    g.saucerXr = (g.saucerXr + g.saucerDX) & 0xFF;
+    drawSaucer(g);
+    if (g.saucerXr < 0x28 || g.saucerXr >= 0xE1) removeSaucer(g);
+  }
+
+  // 06D6: explosion at 0x1F, score at 0x18, removal at 0.
+  function saucerHitSequence(g) {
+    soundOff(g, ~SND.UFO);
+    g.saucerHitTime--;
+    if (g.saucerHitTime === 0x1F) {
+      g.events.push({ type: 'saucerHit' });
+      g.saucerImg = D.SAUCER_EXPLOSION;
+      drawSaucer(g);
+    } else if (g.saucerHitTime === 0x18) {
+      var pts = C.SAUCER_SCORES[g.sauScoreIdx];
+      addScore(g, pts);
+      printText(g, D.TEXT.SAUCER[pts], g.saucerXr, C.SAUCER_YR);
+      g.events.push({ type: 'saucerScore', points: pts });
+    } else if (g.saucerHitTime === 0) {
+      removeSaucer(g);
+    }
+  }
+
+  function alienTask(g, k) {
+    if (k === 2) rollingTask(g);
+    else if (k === 3) plungerTask(g);
+    else saucerTask(g);
+  }
 
   // RunGameObjs 0248: timers count down first; a task runs when its timers
   // are all 0.
@@ -1072,8 +1268,13 @@ SI.RULES = (function () {
     soundOff(g, ~SND.ALIEN_HIT);
   }
 
-  // 1579 (Phase 7 adds the saucer).
-  function saucerShot(g) { shotMiss(g); }
+  // 1579: the saucer was hit; the shot is removed (status 4).
+  function saucerShot(g) {
+    g.saucerHit = 1;
+    g.shot.status = 4;
+    g.alienExploding = 0;
+    soundOff(g, ~SND.ALIEN_HIT);
+  }
 
   // AdjustScore 0988. The score caps at 9,999 (I11).
   function addScore(g, n) {
@@ -1148,6 +1349,9 @@ SI.RULES = (function () {
     if (g.shot.status !== 0) soundOn(g, SND.SHOT); else soundOff(g, ~SND.SHOT);   // ShotSound 172C
     if (g.playerAlive !== 0xFF) soundOn(g, SND.PLAYER_HIT); // 083E
     fleetDelayTask(g);
+    // CtrlSaucerSound 1804.
+    if (!g.saucerActive) soundOff(g, ~SND.UFO);
+    else if (!g.saucerHit) soundOn(g, SND.UFO);
   }
 
   // AShotReloadRate 170E: by score MSB (1CB8 and 1AA1).
@@ -1231,7 +1435,13 @@ SI.RULES = (function () {
     g.isrDelay = C.LETTER_TICKS;
   }
 
-  function timeToSaucer() { /* Phase 7 */ }
+  // TimeToSaucer 0913: counts only while the rack is below its first-rack
+  // height. It tests for 0 before it counts down.
+  function timeToSaucer(g) {
+    if (g.refYr >= C.RACK_START_YR) return;
+    if (g.tillSaucer === 0) { g.tillSaucer = C.SAUCER_TIME; g.saucerStart = 1; }
+    g.tillSaucer = (g.tillSaucer - 1) & 0xFFFF;
+  }
 
   // ---- One 60 Hz frame. input: { left, right, fire } held.
   function step(g, input) {
@@ -1265,7 +1475,7 @@ SI.RULES = (function () {
   return {
     createGame: createGame, step: step, pixel: pixel, addr: addr,
     alienCoords: alienCoords, fleetDelay: fleetDelay, reloadRate: reloadRate,
-    findColumn: findColumn, steps16: steps16, ROWS: ROWS, BYTES: BYTES
+    findColumn: findColumn, steps16: steps16, findInColumn: findInColumn, ROWS: ROWS, BYTES: BYTES
   };
 })();
 
