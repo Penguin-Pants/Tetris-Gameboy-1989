@@ -52,9 +52,9 @@ test.describe('input and audio', () => {
     await showTab(page);
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => !pongApp.paused);
-    const y0 = await page.evaluate(() => pongApp.match.paddles.left);
+    const y0 = await page.evaluate(() => pongApp.match.paddles.right);
     await page.waitForTimeout(300);
-    expect(await page.evaluate(() => [pongApp.match.paddles.left, window.__audio.state])).toEqual([y0, 'running']);
+    expect(await page.evaluate(() => [pongApp.match.paddles.right, window.__audio.state])).toEqual([y0, 'running']);
     await page.keyboard.up('ArrowDown');
   });
 
@@ -64,7 +64,7 @@ test.describe('input and audio', () => {
     expect(await page.evaluate(() => window.__audio.created)).toBe(0);
     await startMatch(page);
     expect(await page.evaluate(() => window.__audio.created)).toBe(1);
-    // Paddle hit: put the ball just right of the left paddle, moving left.
+    // Paddle hit: put the ball just left of the player (right) paddle, moving right.
     const fire = async (setup) => {
       await page.evaluate(setup);
       await page.waitForTimeout(150);
@@ -73,7 +73,7 @@ test.describe('input and audio', () => {
     const near = (a, b, tol) => Math.abs(a - b) <= tol;
     let t = await fire(() => {
       const m = pongApp.match; m.serveTimer = 0; m.paddles.left = 100; m.paddles.right = 100;
-      Object.assign(m.ball, { x: 54, y: 106, dir: -1, vy: 0 });
+      Object.assign(m.ball, { x: 298, y: 106, dir: 1, vy: 0 });
     });
     expect(t.length).toBe(1);
     expect(t[0].freq).toBe(491);
@@ -82,7 +82,7 @@ test.describe('input and audio', () => {
     expect(t.length).toBe(1);
     expect(t[0].freq).toBe(246);
     expect(near(t[0].stop - t[0].start, 0.016, 0.002)).toBe(true);
-    t = await fire(() => { const m = pongApp.match; m.paddles.right = 230; Object.assign(m.ball, { x: 370, y: 20, dir: 1, vy: 0 }); });
+    t = await fire(() => { const m = pongApp.match; m.paddles.left = 230; Object.assign(m.ball, { x: 2, y: 20, dir: -1, vy: 0 }); });
     expect(t.length).toBe(1);
     expect(t[0].freq).toBe(246);
     expect(near(t[0].stop - t[0].start, 0.24, 0.002)).toBe(true);
@@ -97,18 +97,18 @@ test.describe('input and audio', () => {
   test('S4/PK1: Up and Down move the paddle; an OS repeat event alone does not', async ({ page }) => {
     await openArcade(page, FILE);
     await startMatch(page);
-    const y0 = await page.evaluate(() => pongApp.match.paddles.left);
+    const y0 = await page.evaluate(() => pongApp.match.paddles.right);
     await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ArrowDown', repeat: true })));
     await page.waitForTimeout(200);
-    expect(await page.evaluate(() => pongApp.match.paddles.left)).toBe(y0);
+    expect(await page.evaluate(() => pongApp.match.paddles.right)).toBe(y0);
     await page.keyboard.down('ArrowDown');
     await page.waitForTimeout(200);
     await page.keyboard.up('ArrowDown');
-    const y1 = await page.evaluate(() => pongApp.match.paddles.left);
+    const y1 = await page.evaluate(() => pongApp.match.paddles.right);
     expect(y1).toBeGreaterThan(y0);
     await page.keyboard.down('ArrowUp');
     await page.waitForTimeout(200);
     await page.keyboard.up('ArrowUp');
-    expect(await page.evaluate(() => pongApp.match.paddles.left)).toBeLessThan(y1);
+    expect(await page.evaluate(() => pongApp.match.paddles.right)).toBeLessThan(y1);
   });
 });
